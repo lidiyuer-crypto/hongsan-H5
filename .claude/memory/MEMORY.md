@@ -1,0 +1,7 @@
+- [H5项目概览](h5-project-overview.md) — React 19 + TypeScript + Vite，暖暗游戏厅设计，纯单机本地模式
+- [暖暗游戏厅设计系统](warm-dark-design-system.md) — 色彩/字体/组件/响应式CSS变量完整规格
+- [H5引擎架构](h5-engine-architecture.md) — 单文件engine.ts整合6模块 + gameUI单状态对象模式 + 自扯弹窗
+- [H5鼠标vs触控](h5-mouse-vs-touch.md) — H5需同时处理鼠标+触控事件，仅触控桌面端无法选牌
+- [H5引擎绕过陷阱](h5-engine-bypass-trap.md) — 调calculateSettlement绕过engine.getSettlement()导致积分不累计
+- [H5配置传递管线](h5-config-passthrough-pipeline.md) — 新配置字段需触达6个位置，漏任一即静默失败
+- [H5 React事件冒泡](h5-react-bubbling-selection.md) — click冒泡触发父容器清空选区，stopPropagation=小程序catchtap
