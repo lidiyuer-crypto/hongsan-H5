@@ -1,0 +1,27 @@
+# Node
+node_modules
+dist
+dist-ssr
+
+# Server (separate Dockerfile)
+server/node_modules
+server/data
+
+# SSL
+ssl/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Docs
+*.md
+!DEPLOY.md
+
+# OS
+.DS_Store
+Thumbs.db

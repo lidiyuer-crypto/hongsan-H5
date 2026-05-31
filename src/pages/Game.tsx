@@ -3,6 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom';
 import GameEngine, { attachAllCards } from '../engine/gameEngine';
 import { analyze, canBeat, generateAllValidPlays } from '../engine/analyzer';
 import { HAND_TYPES, RANK_DISPLAY, SUITS } from '../engine/constants';
+import { playSound, isMuted, setMuted } from '../lib/sound';
+import { networkClient } from '../network/NetworkGameClient';
+import type { GameStateData, SettlementData, PlayerView } from '../network/types';
 
 // ===== Helpers =====
 function cardDisplay(c: any) {
@@ -75,7 +78,7 @@ function defaultGameUI(): GameUIState {
     settlementBombFans: 0,
     settlementExtraFans: 0,
     settlementExtraFansLabel: '',
-    settlementBombDetails: [] as any[],
+    settlementBombDetails: [] as Array<{ playerId: number; playerName: string; type: string; fans: number; cards: Array<{ suit: number; rankValue: number }> }>,
     settlementNetResults: [] as any[],
     settlementRedPlayers: [] as any[],
     settlementBlackPlayers: [] as any[],
@@ -121,7 +124,7 @@ interface GameUIState {
   settlementDoubleTypeText: string; settlementFans: number;
   settlementAmount: number; settlementFansAmount: number;
   settlementBombFans: number; settlementExtraFans: number;
-  settlementExtraFansLabel: string; settlementBombDetails: any[];
+  settlementExtraFansLabel: string; settlementBombDetails: Array<{ playerId: number; playerName: string; type: string; fans: number; cards: Array<{ suit: number; rankValue: number }> }>;
   settlementNetResults: any[]; settlementRedPlayers: any[]; settlementBlackPlayers: any[];
   settlementRedTotal: number; settlementBlackTotal: number;
   settlementRedBonus: number; settlementBlackBonus: number;
@@ -145,6 +148,9 @@ export default function Game() {
   const autoPlayTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const gameStateRef = useRef<any>(null);
   const lastTurnIndexRef = useRef(-1);
+  const lastChePhaseRef = useRef(false);
+  const lastFinishedRef = useRef(new Set<number>());
+  const lastRevealedRef = useRef(new Set<number>());
   const settlementRef = useRef<any>(null);
 
   // Touch/mouse state
@@ -165,9 +171,213 @@ export default function Game() {
   // Hint state
   const hintRef = useRef<{ key: string; index: number }>({ key: '', index: 0 });
 
+  // Online mode detection
+  const isOnline = gameId?.startsWith('online-') ?? false;
+  const isOnlineRef = useRef(isOnline);
+  isOnlineRef.current = isOnline;
+  const settlementListenerRef = useRef<(() => void) | null>(null);
+  const stateListenerRef = useRef<(() => void) | null>(null);
+
   const [gameUI, setGameUI] = useState<GameUIState>(defaultGameUI());
+  const [muted, setMutedState] = useState(isMuted());
+  const [bombExpanded, setBombExpanded] = useState(false);
+  const [toastMsg, setToastMsg] = useState('');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const uiRef = useRef(gameUI);
   uiRef.current = gameUI;
+
+  const flashError = (msg: string) => {
+    setToastMsg(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToastMsg(''), 2500);
+  };
+
+  // ===== renderOnlineGameState (maps server state to GameUIState) =====
+  const renderOnlineGameState = useCallback((state: GameStateData) => {
+    const mySeat = state.mySeat;
+    const myPlayer = state.players[mySeat];
+    const opponents = [1, 2, 3].map(offset => state.players[(mySeat + offset) % 4]);
+
+    // Map my hand - server sends full cards with suit/rankValue/displayRank etc.
+    const myHand = myPlayer.hand.map((c: any) => ({
+      ...c, isSelected: false,
+    }));
+
+    // Preserve selection state
+    const prevMyHand = uiRef.current.myHand;
+    if (prevMyHand.length === myHand.length) {
+      const prevSel = new Map<string, boolean>();
+      prevMyHand.forEach((c: any) => { if (c.isSelected) prevSel.set(cardKey(c), true); });
+      myHand.forEach((c: any) => { if (prevSel.has(cardKey(c))) c.isSelected = true; });
+    }
+
+    // Determine team text/class
+    const getTeamInfo = (p: PlayerView, isMe: boolean) => {
+      if (isMe && state.isBusinessMode && state.players[mySeat] === p) {
+        return p.isRed3Team ? { text: '红三(业务)', cls: 'red3' } : { text: '未知身份', cls: 'unknown' };
+      }
+      if (!p.revealed) return { text: '未知身份', cls: 'unknown' };
+      if (state.isBusinessMode && state.businessPlayerId === p.id) return { text: '红三(业务)', cls: 'red3' };
+      if (p.isRed3Team) return { text: '红三阵营', cls: 'red3' };
+      return { text: '黑三阵营', cls: 'black3' };
+    };
+
+    const myTeam = getTeamInfo(myPlayer, true);
+    const t1 = getTeamInfo(opponents[0], false);
+    const t2 = getTeamInfo(opponents[1], false);
+    const t3 = getTeamInfo(opponents[2], false);
+
+    // Build play slots — hide pass tag for the pending-pass player (show flash instead)
+    const playSlots = state.passStatuses.map((passed, i) => ({
+      cards: (i === state.lastPlayByPlayerId && state.lastValidPlay)
+        ? state.lastValidPlay.cards : [],
+      passed: passed && !(state.pendingCollect && i === state.pendingPassPlayerId && i !== state.lastPlayByPlayerId),
+      isChe: !!(state.lastValidPlay && state.lastValidPlay.type === HAND_TYPES.CHE && i === state.lastPlayByPlayerId),
+    }));
+
+    // Che phase - check if my player can che
+    const myCanChe = myPlayer.canChe || false;
+
+    const data: Partial<GameUIState> = {
+      myPlayerId: mySeat,
+      myHand,
+      myPot: myPlayer.pot,
+      myName: myPlayer.name,
+      myTeamText: myTeam.text,
+      myTeamClass: myTeam.cls,
+
+      p1Cards: opponents[0].hand || [],
+      p2Cards: opponents[1].hand || [],
+      p3Cards: opponents[2].hand || [],
+      p1Pot: opponents[0].pot,
+      p2Pot: opponents[1].pot,
+      p3Pot: opponents[2].pot,
+      p1Name: opponents[0].name,
+      p2Name: opponents[1].name,
+      p3Name: opponents[2].name,
+      p1TeamText: t1.text, p2TeamText: t2.text, p3TeamText: t3.text,
+      p1TeamClass: t1.cls, p2TeamClass: t2.cls, p3TeamClass: t3.cls,
+      p1Revealed: opponents[0].revealed,
+      p2Revealed: opponents[1].revealed,
+      p3Revealed: opponents[2].revealed,
+      p1Rank: opponents[0].rank || 0,
+      p2Rank: opponents[1].rank || 0,
+      p3Rank: opponents[2].rank || 0,
+      p1RankLabel: opponents[0].rank ? RANK_NAMES[opponents[0].rank - 1] : '',
+      p2RankLabel: opponents[1].rank ? RANK_NAMES[opponents[1].rank - 1] : '',
+      p3RankLabel: opponents[2].rank ? RANK_NAMES[opponents[2].rank - 1] : '',
+
+      faceDownP1: !state.players.find(p => p.id === opponents[0].id)?.revealed,
+      faceDownP2: !state.players.find(p => p.id === opponents[1].id)?.revealed,
+      faceDownP3: !state.players.find(p => p.id === opponents[2].id)?.revealed,
+      p1CardCount: opponents[0].handCount,
+      p2CardCount: opponents[1].handCount,
+      p3CardCount: opponents[2].handCount,
+      showHandCount: state.config.showHandCount,
+
+      currentFans: state.currentFans,
+      turnIndex: state.turnIndex,
+      lastValidPlay: state.lastValidPlay,
+      playSlots,
+      passFlashSlot: state.pendingPassPlayerId !== undefined ? state.pendingPassPlayerId : -1,
+      historyCards: state.historyCards,
+      tablePotCount: state.tablePotCount,
+
+      showControls: state.turnIndex === mySeat && !state.chePhase && state.status === 'playing',
+      showCheControls: state.chePhase && myCanChe && !state.cheTimerExpired,
+      canChe: myCanChe,
+      showTimer: state.chePhase,
+      timerPercent: state.chePhaseStartedAt
+        ? Math.max(0, (3000 - (Date.now() - state.chePhaseStartedAt)) / 30)
+        : 100,
+      turnTimePercent: 100,
+    };
+
+    setGameUI(prev => ({ ...prev, ...data }));
+  }, []);
+
+  // ===== renderOnlineSettlement =====
+  const renderOnlineSettlement = useCallback((result: SettlementData) => {
+    const nameMap: Record<number, string> = { 0: '玩家', 1: '玩家A', 2: '玩家B', 3: '玩家C' };
+    // Try to get real names from game state
+    const gs = gameStateRef.current as GameStateData | null;
+    if (gs) {
+      gs.players.forEach(p => { nameMap[p.id] = p.name; });
+    }
+
+    const netResults = result.results.map(r => ({
+      ...r, playerName: nameMap[r.playerId] || r.name,
+    })).sort((a, b) => b.netWon - a.netWon);
+
+    const redPlayers = result.results.filter(r => r.isRed3Team);
+    const blackPlayers = result.results.filter(r => !r.isRed3Team);
+    const redTotal = redPlayers.reduce((s, r) => s + r.pot, 0);
+    const blackTotal = blackPlayers.reduce((s, r) => s + r.pot, 0);
+    const doubleTypeText = gs?.config.doubleType === 'steep' ? '陡翻' : '平翻';
+
+    const titleMap: Record<string, string> = {
+      '双关': '双关胜利！', '业务胜利': '业务玩家胜利！',
+      '非业务玩家胜利': '非业务玩家胜利！', '章子比拼': '章子比拼获胜！',
+    };
+
+    const reasonMap: Record<string, string> = {
+      '双关': '同阵营玩家以第一、二名完成！',
+      '业务胜利': '业务玩家成功关住了其他玩家',
+      '非业务玩家胜利': '业务失败！三家逃脱',
+      '章子比拼': '两队章子总数比拼获胜',
+    };
+
+    const bombDetails = result.bombDetails.map(b => ({
+      playerId: b.playerId,
+      playerName: nameMap[b.playerId] || ('玩家' + b.playerId),
+      type: b.type,
+      fans: b.fans,
+      cards: b.cards || [],
+    }));
+
+    setBombExpanded(false);
+
+    setGameUI(prev => ({
+      ...prev,
+      showSettlement: true,
+      settlementTitle: titleMap[result.victoryReason] || `${result.victoryTeam === 'red' ? '红三' : '黑三'}阵营胜利`,
+      settlementReason: reasonMap[result.victoryReason] || '',
+      settlementWinnerTeam: result.victoryTeam === 'business' ? 'red' : (result.victoryTeam || 'red'),
+      settlementBaseAmount: gs?.config.baseAmount || 5,
+      settlementDoubleTypeText: doubleTypeText,
+      settlementFans: result.fans,
+      settlementAmount: result.amount,
+      settlementFansAmount: result.amount - (gs?.config.baseAmount || 5),
+      settlementBombFans: result.bombFans,
+      settlementExtraFans: result.extraFans,
+      settlementExtraFansLabel: result.extraFansLabel,
+      settlementBombDetails: bombDetails,
+      settlementNetResults: netResults,
+      settlementRedPlayers: redPlayers,
+      settlementBlackPlayers: blackPlayers,
+      settlementRedTotal: redTotal,
+      settlementBlackTotal: blackTotal,
+      settlementRedBonus: 0,
+      settlementBlackBonus: 0,
+      settlementRedFinal: redPlayers.reduce((s, r) => s + r.netWon, 0),
+      settlementBlackFinal: blackPlayers.reduce((s, r) => s + r.netWon, 0),
+      settlementShowFormula: true,
+      settlementCurrentRound: result.currentRound,
+      settlementTotalRounds: result.totalRounds,
+      settlementIsLastRound: result.isLastRound,
+    }));
+
+    if (result.isLastRound) {
+      setTimeout(() => playSound('settlement_final'), 600);
+    } else {
+      const humanPlayer = result.results.find(r => r.playerId === (gs?.mySeat ?? 0));
+      if (humanPlayer && humanPlayer.netWon >= 0) {
+        setTimeout(() => playSound('settlement_win'), 600);
+      } else {
+        setTimeout(() => playSound('settlement_lose'), 600);
+      }
+    }
+  }, []);
 
   // ===== renderGameState =====
   const renderGameState = useCallback(() => {
@@ -318,6 +528,42 @@ export default function Game() {
       data.timerPercent = 100;
     }
 
+    // ===== 音效检测 =====
+    // 扯牌阶段变化
+    if (gs.chePhase !== lastChePhaseRef.current) {
+      lastChePhaseRef.current = gs.chePhase;
+      if (gs.chePhase) playSound('che_open');
+      else playSound('che_close');
+    }
+    // 回合切换
+    if (gs.turnIndex !== lastTurnIndexRef.current && gs.status !== 'finished') {
+      const prevTurn = lastTurnIndexRef.current;
+      if (gs.turnIndex === 0) {
+        playSound('turn_start');
+        if (gs.isFirstTurnOfGame) playSound('first_turn_h4');
+      }
+      // 其他人过牌音效
+      if (prevTurn >= 0 && gs.passStatuses && gs.passStatuses[prevTurn]) {
+        playSound('pass_other');
+      }
+    }
+    // 玩家出完牌
+    const finishedSet = new Set<number>();
+    gs.players.forEach((p: any) => { if (p && p.finished) finishedSet.add(p.id); });
+    finishedSet.forEach((id: number) => {
+      if (!lastFinishedRef.current.has(id)) {
+        lastFinishedRef.current.add(id);
+        if (id !== 0) playSound('player_finish');
+      }
+    });
+    // 红三暴露
+    gs.players.forEach((p: any) => {
+      if (p && p.revealed && !lastRevealedRef.current.has(p.id)) {
+        lastRevealedRef.current.add(p.id);
+        playSound('red3_reveal');
+      }
+    });
+
     setGameUI(prev => ({ ...prev, ...data }));
 
     // Turn timer management (only when game is playing)
@@ -340,8 +586,10 @@ export default function Game() {
   }, []);
 
   // ===== Turn Timer =====
+  const timerWarnedRef = useRef(false);
   const startTurnTimer = useCallback(() => {
     if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+    timerWarnedRef.current = false;
     const startTime = Date.now();
     setGameUI(prev => ({ ...prev, turnTimePercent: 100 }));
     turnTimerRef.current = setInterval(() => {
@@ -350,6 +598,10 @@ export default function Game() {
       const elapsed = Date.now() - startTime;
       const remaining = Math.max(0, 30000 - elapsed);
       setGameUI(prev => ({ ...prev, turnTimePercent: (remaining / 30000) * 100 }));
+      if (remaining <= 10000 && !timerWarnedRef.current) {
+        timerWarnedRef.current = true;
+        playSound('timer_warning');
+      }
       if (remaining <= 0) {
         clearTurnTimer();
         onTurnTimeout();
@@ -362,6 +614,7 @@ export default function Game() {
   };
 
   const onTurnTimeout = () => {
+    playSound('timer_timeout');
     const gs = gameStateRef.current;
     if (!gs || gs.status === 'finished' || gs.turnIndex !== 0 || gs.chePhase) return;
 
@@ -404,12 +657,32 @@ export default function Game() {
   };
 
   const onCheTimerExpired = () => {
-    engineRef.current?.endChePhase();
-    // onChange will trigger renderGameState
+    if (isOnlineRef.current) {
+      networkClient.declineChe();
+    } else {
+      engineRef.current?.endChePhase();
+      // onChange will trigger renderGameState
+    }
   };
 
   // ===== Actions =====
+  // 根据牌型播放对应音效
+  const playCardTypeSound = (info: any) => {
+    switch (info.type) {
+      case HAND_TYPES.SINGLE: playSound('play_single'); break;
+      case HAND_TYPES.PAIR: playSound('play_pair'); break;
+      case HAND_TYPES.STRAIGHT: playSound('play_straight'); break;
+      case HAND_TYPES.BOMB: playSound('play_bomb'); break;
+      case HAND_TYPES.H_BOMB: playSound('play_hbomb'); break;
+      case HAND_TYPES.CHE: playSound('play_che'); break;
+    }
+  };
+
   const submitPlay = (cards: any[], isSelfChe: boolean, cheRemain: any[] | null) => {
+    if (isOnlineRef.current) {
+      networkClient.playCards(cards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })), isSelfChe || false);
+      return;
+    }
     const engine = engineRef.current;
     if (!engine) return;
     const result = engine.playCards(0, cards, isSelfChe || false, cheRemain);
@@ -424,10 +697,10 @@ export default function Game() {
   const doPlay = () => {
     const hand = uiRef.current.myHand;
     const sel = hand.filter((c: any) => c.isSelected);
-    if (sel.length === 0) return;
+    if (sel.length === 0) { flashError('请先选择要出的牌'); return; }
 
     const info = analyze(sel);
-    if (!info) return;
+    if (!info) { flashError('无效牌型，请重新选择'); return; }
 
     const gs = gameStateRef.current;
     if (!gs) return;
@@ -442,12 +715,15 @@ export default function Game() {
         const isSingleH4 = info.type === HAND_TYPES.SINGLE && hasH4;
         const isThree4sSelfChe = info.type === HAND_TYPES.BOMB && sel.length === 3 &&
           sel[0].rankValue === 4 && hasH4;
-        if (!isSingleH4 && !isThree4sSelfChe) return;
+        if (!isSingleH4 && !isThree4sSelfChe) { flashError('首回合必须先出红桃4'); return; }
       }
     }
 
     // canBeat check
-    if (gs.lastValidPlay && !canBeat(gs.lastValidPlay, info)) return;
+    if (gs.lastValidPlay && !canBeat(gs.lastValidPlay, info)) {
+      flashError('打不过场上的牌，请重新选择或点「不要」');
+      return;
+    }
 
     // Self-che dialog for bombs as first play
     if (!gs.lastValidPlay && info.type === HAND_TYPES.BOMB) {
@@ -455,6 +731,7 @@ export default function Game() {
         sel[0].rankValue === 4 &&
         hand.filter((c: any) => c.rankValue === 4).length === 3;
       if (isFirstTurnWithThree4sOnly) {
+        playSound('play_bomb');
         submitPlay(sel, true, [sel[1], sel[2]]);
       } else {
         setGameUI(prev => ({ ...prev, showSelfCheDialog: true, selfCheCards: sel }));
@@ -462,39 +739,51 @@ export default function Game() {
       return;
     }
 
+    playCardTypeSound(info);
     submitPlay(sel, false, null);
   };
 
-  const handlePlayClick = () => { doPlay(); };
+  const handlePlayClick = () => { cancelManagedIfNeeded(); doPlay(); };
 
   const handleSelfCheBomb = () => {
     const cards = uiRef.current.selfCheCards;
     setGameUI(prev => ({ ...prev, showSelfCheDialog: false, selfCheCards: null }));
-    if (cards) submitPlay(cards, false, null);
+    if (cards) { playSound('play_bomb'); submitPlay(cards, false, null); }
   };
 
   const handleSelfCheChe = () => {
     const cards = uiRef.current.selfCheCards;
     setGameUI(prev => ({ ...prev, showSelfCheDialog: false, selfCheCards: null }));
-    if (cards) submitPlay(cards, true, [cards[1], cards[2]]);
+    if (cards) { playSound('play_che'); submitPlay(cards, true, [cards[1], cards[2]]); }
   };
 
   const doPass = () => {
+    if (isOnlineRef.current) {
+      playSound('pass_self');
+      networkClient.pass();
+      return;
+    }
     const engine = engineRef.current;
     if (!engine) return;
+    playSound('pass_self');
     engine.passTurn(0);
     // onChange will trigger renderGameState
     triggerBotIfNeeded();
   };
 
-  const handlePassClick = () => { doPass(); };
+  const handlePassClick = () => { cancelManagedIfNeeded(); doPass(); };
 
   const handleCheAction = () => {
+    cancelManagedIfNeeded();
     const gs = gameStateRef.current;
-    if (!gs) return;
+    if (!gs || !gs.lastValidPlay) return;
     const rank = gs.lastValidPlay.rank;
     const matchCards = uiRef.current.myHand.filter((c: any) => c.rankValue === rank).slice(0, 2);
     if (matchCards.length < 2) return;
+    if (isOnlineRef.current) {
+      networkClient.cheAction(matchCards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })));
+      return;
+    }
     engineRef.current?.cheAction(0, matchCards);
     triggerBotIfNeeded();
   };
@@ -505,11 +794,16 @@ export default function Game() {
       myHand: prev.myHand.map((c: any) => ({ ...c, isSelected: false })),
       showCheControls: false,
     }));
+    if (isOnlineRef.current) {
+      networkClient.declineChe();
+      return;
+    }
     engineRef.current?.declineChe(0);
   };
 
   // ===== Hint =====
   const handleHint = () => {
+    cancelManagedIfNeeded();
     const hand = uiRef.current.myHand.map((c: any) => ({ ...c, isSelected: false }));
     const gs = gameStateRef.current;
     if (!gs) return;
@@ -552,12 +846,30 @@ export default function Game() {
   };
 
   // ===== Managed / 托管 =====
+  const cancelManagedIfNeeded = () => {
+    if (uiRef.current.isManaged) {
+      if (autoPlayTimerRef.current) {
+        clearTimeout(autoPlayTimerRef.current);
+        autoPlayTimerRef.current = undefined;
+      }
+      setGameUI(prev => ({ ...prev, isManaged: false }));
+    }
+  };
+
   const toggleManaged = () => {
     setGameUI(prev => {
       const next = !prev.isManaged;
-      if (!next && autoPlayTimerRef.current) {
-        clearTimeout(autoPlayTimerRef.current);
-        autoPlayTimerRef.current = undefined;
+      if (next) {
+        playSound('managed_on');
+        // Just turned on — kick off auto-play immediately if it's our turn
+        setTimeout(() => scheduleAutoPlay(), 200);
+      } else {
+        playSound('managed_off');
+        // Turned off — cancel any pending auto-play
+        if (autoPlayTimerRef.current) {
+          clearTimeout(autoPlayTimerRef.current);
+          autoPlayTimerRef.current = undefined;
+        }
       }
       return { ...prev, isManaged: next };
     });
@@ -565,35 +877,62 @@ export default function Game() {
 
   const scheduleAutoPlay = () => {
     if (autoPlayTimerRef.current) return;
-    const ui = uiRef.current;
-    if (!ui.isManaged) return;
+    if (!uiRef.current.isManaged) return;
     const gs = gameStateRef.current;
     if (!gs || gs.status === 'finished' || gs.turnIndex !== 0) return;
 
-    if (gs.chePhase && ui.showCheControls) {
-      autoPlayTimerRef.current = setTimeout(() => {
-        autoPlayTimerRef.current = undefined;
-        handleDeclineChe();
-        scheduleAutoPlay();
-      }, 800);
+    // In che phase — always decline for managed mode
+    if (gs.chePhase) {
+      const myPlayer = gs.players[0];
+      if (myPlayer && myPlayer.canChe && !gs.cheTimerExpired) {
+        autoPlayTimerRef.current = setTimeout(() => {
+          autoPlayTimerRef.current = undefined;
+          if (!uiRef.current.isManaged) return;
+          handleDeclineChe();
+          // After declining, bot may play — renderGameState will call scheduleAutoPlay again
+        }, 800);
+      }
       return;
     }
+
+    // Use engine state directly to find a play (not UI ref which can be stale)
+    const myPlayer = gs.players[0];
+    if (!myPlayer || !myPlayer.hand || myPlayer.hand.length === 0) return;
+
+    const handCopy = myPlayer.hand.map((c: any) => ({ ...c }));
+    const plays = generateAllValidPlays(handCopy, gs.lastValidPlay, gs.isFirstTurnOfGame);
 
     autoPlayTimerRef.current = setTimeout(() => {
       autoPlayTimerRef.current = undefined;
       if (!uiRef.current.isManaged) return;
-      handleHint();
+
+      // Re-check conditions (might have changed during timeout)
       const gs2 = gameStateRef.current;
-      if (!gs2 || gs2.turnIndex !== 0) return;
-      const hasSelection = uiRef.current.myHand.some((c: any) => c.isSelected);
-      if (hasSelection) {
-        autoPlayTimerRef.current = setTimeout(() => {
-          autoPlayTimerRef.current = undefined;
-          if (!uiRef.current.isManaged) return;
-          doPlay();
-        }, 700);
+      if (!gs2 || gs2.status === 'finished' || gs2.turnIndex !== 0) return;
+
+      if (plays.length === 0) {
+        // No valid play — pass if required
+        if (gs2.lastValidPlay) {
+          doPass();
+        }
+        return;
       }
-    }, 1000);
+
+      // Pick the first (smallest) valid play
+      const play = plays[0];
+      const currentHand = uiRef.current.myHand.map((c: any) => ({
+        ...c,
+        isSelected: play.cards.some((pc: any) => pc.suit === c.suit && pc.rankValue === c.rankValue),
+      }));
+      setGameUI(prev => ({ ...prev, myHand: currentHand }));
+
+      // Short delay for visual feedback, then play
+      autoPlayTimerRef.current = setTimeout(() => {
+        autoPlayTimerRef.current = undefined;
+        if (!uiRef.current.isManaged) return;
+        doPlay();
+      }, 500);
+    }, 800);
   };
 
   // ===== Bot Trigger =====
@@ -622,6 +961,7 @@ export default function Game() {
   };
 
   const onHandTouchStart = (e: React.TouchEvent, idx: number) => {
+    cancelManagedIfNeeded(); playSound('card_select');
     const ui = uiRef.current;
     if (!ui.showControls && !ui.showCheControls) return;
     if (idx < 0 || idx >= ui.myHand.length) return;
@@ -704,6 +1044,7 @@ export default function Game() {
 
   // ===== Mouse Selection (desktop) =====
   const onCardMouseDown = (e: React.MouseEvent, idx: number) => {
+    cancelManagedIfNeeded(); playSound('card_select');
     const ui = uiRef.current;
     if (!ui.showControls && !ui.showCheControls) return;
     if (idx < 0 || idx >= ui.myHand.length) return;
@@ -775,6 +1116,8 @@ export default function Game() {
     const settlement = settlementRef.current;
     if (!gs || !settlement) return;
 
+    setBombExpanded(false);
+
     const players = gs.players || [];
     const cfg = gs.config || {};
 
@@ -843,11 +1186,24 @@ export default function Game() {
         playerName: p ? p.name : ('玩家' + (b.playerId + 1)),
         type: b.type,
         fans: b.fans,
+        cards: b.cards || [],
       };
     });
 
     const winnerTeam = gs.victoryTeam === 'business' ? 'red' : (gs.victoryTeam || 'red');
     const isLastRound = (gs.currentRound >= (gs.totalRounds || 8));
+
+    // 结算音效
+    playSound('settlement_show');
+    setTimeout(() => {
+      const myPlayer = gs.players[0];
+      const iWon = myPlayer && myPlayer.isRed3Team
+        ? (winnerTeam === 'red')
+        : (winnerTeam !== 'red' && winnerTeam !== 'business');
+      if (isLastRound) playSound('settlement_final');
+      else if (iWon) playSound('settlement_win');
+      else playSound('settlement_lose');
+    }, 600);
 
     setGameUI(prev => ({
       ...prev,
@@ -878,6 +1234,23 @@ export default function Game() {
   }, []);
 
   const handleNextRound = () => {
+    if (isOnlineRef.current) {
+      networkClient.nextRound();
+      setGameUI(prev => ({
+        ...prev,
+        showSettlement: false,
+        playSlots: [
+          { cards: [], passed: false }, { cards: [], passed: false },
+          { cards: [], passed: false }, { cards: [], passed: false },
+        ],
+        historyCards: [],
+        tablePotCount: 0,
+        showControls: false,
+        showCheControls: false,
+        showTimer: false,
+      }));
+      return;
+    }
     const engine = engineRef.current;
     if (!engine) return;
     const result = engine.nextRound();
@@ -927,22 +1300,83 @@ export default function Game() {
   };
 
   const handleLeaveRoom = () => {
+    if (isOnlineRef.current) {
+      networkClient.leaveRoom();
+    }
     engineRef.current?.destroy();
     navigate('/');
   };
 
   // ===== Init =====
+  const initEscapeRef = useRef(false);
+  const savedStateJsonRef = useRef<string | null>(null);
   useEffect(() => {
+    // ===== ONLINE MODE =====
+    if (isOnline) {
+      // Try to load initial state from sessionStorage (saved by Room.tsx on game_start)
+      const savedState = sessionStorage.getItem('onlineGameState');
+      if (savedState) {
+        try {
+          const state: GameStateData = JSON.parse(savedState);
+          gameStateRef.current = state;
+          renderOnlineGameState(state);
+          sessionStorage.removeItem('onlineGameState');
+        } catch {}
+      }
+
+      // Subscribe to live state updates
+      stateListenerRef.current = networkClient.onStateChange((state: GameStateData) => {
+        gameStateRef.current = state;
+        if (state.status === 'finished') {
+          clearTurnTimer();
+          clearCheTimer();
+          // Settlement will arrive via onSettlement
+          return;
+        }
+        renderOnlineGameState(state);
+      });
+
+      // Subscribe to server errors
+      const unsubError = networkClient.onError((msg) => { flashError(msg); });
+
+      // Subscribe to settlement
+      settlementListenerRef.current = networkClient.onSettlement((result: SettlementData) => {
+        gameStateRef.current && renderOnlineGameState(gameStateRef.current as GameStateData);
+        renderOnlineSettlement(result);
+      });
+
+      return () => {
+        clearTurnTimer();
+        clearCheTimer();
+        if (autoPlayTimerRef.current) clearTimeout(autoPlayTimerRef.current);
+        if (stateListenerRef.current) stateListenerRef.current();
+        if (settlementListenerRef.current) settlementListenerRef.current();
+        unsubError();
+      };
+    }
+
+    // ===== LOCAL MODE =====
     let engine: GameEngine;
     let created = false;
 
-    const saved = sessionStorage.getItem('localGame');
+    // Load saved state: from sessionStorage on first run, from ref on Strict Mode re-run (sessionStorage already cleared)
+    let saved: string | null = null;
+    if (!initEscapeRef.current) {
+      saved = sessionStorage.getItem('localGame');
+      if (saved) {
+        savedStateJsonRef.current = saved;
+        sessionStorage.removeItem('localGame');
+      }
+      initEscapeRef.current = true;
+    } else {
+      saved = savedStateJsonRef.current;
+    }
+
     if (saved) {
       try {
         const state = JSON.parse(saved);
         engine = new GameEngine();
         engine._state = attachAllCards(state);
-        sessionStorage.removeItem('localGame');
       } catch {
         engine = new GameEngine();
         created = true;
@@ -996,7 +1430,7 @@ export default function Game() {
       unsub();
       engine.destroy();
     };
-  }, [gameId]);
+  }, [gameId, isOnline, renderOnlineGameState, renderOnlineSettlement]);
 
   // ===== Render Helpers =====
   const renderCard = (c: any, size: 'mini' | 'normal' | 'large', extraClass = '') => {
@@ -1076,7 +1510,7 @@ export default function Game() {
               width: 'var(--mini-card-w)', height: 'var(--mini-card-h)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}>
-              <span style={{ fontSize: 'var(--fs-base)', fontWeight: 900, color: 'var(--accent)' }}>{p.cardCount}</span>
+              {ui.showHandCount && <span style={{ fontSize: 'var(--fs-base)', fontWeight: 900, color: 'var(--accent)' }}>{p.cardCount}</span>}
             </div>
           </div>
         ) : (
@@ -1120,6 +1554,17 @@ export default function Game() {
 
   return (
     <div className="game-table" onClick={onTableBgTap}>
+      {/* Error toast */}
+      {toastMsg && (
+        <div style={{
+          position: 'fixed', top: 'clamp(60px, 10vh, 100px)', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 300, padding: '10px 24px', borderRadius: 'var(--radius-lg)',
+          background: 'rgba(220,38,38,0.9)', color: '#fff',
+          fontSize: 'var(--fs-sm)', fontWeight: 700,
+          boxShadow: '0 4px 20px rgba(220,38,38,0.4)',
+          animation: 'toastIn 0.3s ease',
+        }}>{toastMsg}</div>
+      )}
       {/* Turn countdown bar */}
       {ui.showControls && (
         <div className="turn-timer-bar">
@@ -1148,15 +1593,37 @@ export default function Game() {
         </div>
       </div>
 
+      {/* Mute button — top area */}
+      <div style={{
+        position: 'absolute', top: 'clamp(6px, 2vh, 14px)', right: 'clamp(6px, 2vw, 14px)',
+        zIndex: 25, cursor: 'pointer',
+        width: 32, height: 32, borderRadius: '50%',
+        background: 'var(--bg-surface)',
+        border: '1px solid rgba(255,255,255,0.06)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 'var(--fs-sm)',
+      }} onClick={(e) => {
+        e.stopPropagation();
+        setMuted(!muted);
+        setMutedState(!muted);
+      }}>
+        <span>{muted ? '🔇' : '🔊'}</span>
+      </div>
+
       {/* Score panel button */}
       <div className="score-panel-btn" onClick={(e) => { e.stopPropagation(); openScorePanel(); }}>
         <span className="score-btn-icon">📊</span>
         <span className="score-btn-label">积分</span>
       </div>
 
-      {/* Managed button */}
-      <div className={`managed-btn ${ui.isManaged ? 'managed-active' : ''}`} onClick={(e) => { e.stopPropagation(); toggleManaged(); }}>
-        <span>{ui.isManaged ? '取消托管' : '托管'}</span>
+      {/* Managed button — same style as score panel */}
+      <div className={`score-panel-btn ${ui.isManaged ? 'managed-active' : ''}`}
+        style={{ right: 'clamp(62px, 18vw, 80px)' }}
+        onClick={(e) => { e.stopPropagation(); toggleManaged(); }}>
+        <span className="score-btn-icon">{ui.isManaged ? '🎮' : '🤖'}</span>
+        <span className="score-btn-label" style={{ color: ui.isManaged ? 'var(--green)' : 'var(--ink-dim)' }}>
+          {ui.isManaged ? '托管中' : '托管'}
+        </span>
       </div>
 
       {/* ===== Top Zone: Player B (index 2) ===== */}
@@ -1398,19 +1865,6 @@ export default function Game() {
                 </div>
                 <div className="fin-divider" />
 
-                <span className="fin-sub-title">炸弹</span>
-                {ui.settlementBombDetails.map((b: any, i: number) => (
-                  <div key={i} className="bomb-mini">
-                    <span className="bomb-mini-name">{b.playerName}</span>
-                    <span className="bomb-mini-type">{b.type}</span>
-                    <span className="bomb-mini-fans">+{b.fans}番</span>
-                  </div>
-                ))}
-                {ui.settlementBombDetails.length === 0 && (
-                  <div className="fin-row"><span className="fin-value dim">无</span></div>
-                )}
-                <div className="fin-divider" />
-
                 <div className="fin-row"><span className="fin-label">番数（炸弹）</span><span className="fin-value">{ui.settlementBombFans} 番</span></div>
                 {ui.settlementExtraFans > 0 && (
                   <div className="fin-row"><span className="fin-label">番数（{ui.settlementExtraFansLabel}）</span><span className="fin-value">+{ui.settlementExtraFans} 番</span></div>
@@ -1432,6 +1886,79 @@ export default function Game() {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* 炸弹详情 — 全宽横排，可折叠 */}
+            <div className={`settlement-bomb-section ${bombExpanded ? 'expanded' : ''}`}>
+              <div className="bomb-section-header" onClick={() => setBombExpanded(!bombExpanded)}>
+                <span className="settlement-section-title" style={{ marginBottom: 0 }}>炸弹详情</span>
+                <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--accent)', fontWeight: 700 }}>
+                  {ui.settlementBombFans > 0 ? `${ui.settlementBombDetails.length}炸 ${ui.settlementBombFans}番` : '无'}
+                </span>
+                <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--ink-dim)', marginLeft: 'auto' }}>
+                  {bombExpanded ? '收起 ▲' : '展开 ▼'}
+                </span>
+              </div>
+              {bombExpanded && ui.settlementBombDetails.length > 0 && (
+                <div className="bomb-detail-list">
+                  {(() => {
+                    const grouped: Record<number, typeof ui.settlementBombDetails> = {};
+                    ui.settlementBombDetails.forEach(b => {
+                      if (!grouped[b.playerId]) grouped[b.playerId] = [];
+                      grouped[b.playerId].push(b);
+                    });
+                    return Object.entries(grouped).map(([playerId, bombs]) => {
+                      const totalFans = bombs.reduce((s, b) => s + b.fans, 0);
+                      const playerName = bombs[0].playerName;
+                      return (
+                        <div key={playerId} className="bomb-player-group">
+                          <div className="bomb-player-summary">
+                            <span className="bomb-player-name">{playerName}</span>
+                            <span className="bomb-player-stat">{bombs.length}炸 {totalFans}番</span>
+                          </div>
+                          <div className="bomb-cards-row">
+                            {bombs.map((b, bi) => (
+                              <div key={bi} className="bomb-entry">
+                                <div className="bomb-entry-cards">
+                                  {(b.cards || []).map((c: any, ci: number) => {
+                                    const rank = RANK_DISPLAY[c.rankValue] || '?';
+                                    const suit = SUITS[c.suit] || '';
+                                    const isRed = c.suit === 0 || c.suit === 2;
+                                    return (
+                                      <div key={ci} style={{
+                                        width: 'clamp(17px, 3.6vmin, 23px)',
+                                        height: 'calc(clamp(17px, 3.6vmin, 23px) * 1.38)',
+                                        background: '#fff',
+                                        borderRadius: 2,
+                                        display: 'inline-flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        color: isRed ? 'var(--card-red)' : '#2d2d2d',
+                                        fontSize: 'clamp(7px, 1.5vmin, 10px)',
+                                        fontWeight: 900,
+                                        lineHeight: 1.1,
+                                        border: '1px solid rgba(0,0,0,0.1)',
+                                        flexShrink: 0,
+                                      }}>
+                                        <span>{rank}</span>
+                                        <span style={{ fontSize: 'calc(clamp(7px, 1.5vmin, 10px) * 0.7)', lineHeight: 1 }}>
+                                          {suit}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <span className="bomb-entry-label">{b.type} +{b.fans}番</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              )}
             </div>
 
             {/* Round info + Actions */}

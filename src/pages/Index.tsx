@@ -1,6 +1,9 @@
 import { useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import GameEngine from '../engine/gameEngine';
+import { playSound } from '../lib/sound';
+import { useGameStore } from '../stores/gameStore';
+import { networkClient } from '../network/NetworkGameClient';
 
 // ===== Types =====
 interface BotPlayer {
@@ -11,6 +14,12 @@ interface BotPlayer {
 }
 
 const BOT_NAMES = ['电脑A', '电脑B', '电脑C'];
+
+function getApiBase(): string {
+  const host = localStorage.getItem('server_host') || location.hostname;
+  const port = localStorage.getItem('server_port') || location.port || (location.protocol === 'https:' ? '443' : '80');
+  return `${location.protocol}//${host}:${port}`;
+}
 
 // Inline style helpers using CSS variables
 const S = {
@@ -38,9 +47,22 @@ export default function Index() {
   const navigate = useNavigate();
   const titleTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  const [avatarUrl, setAvatarUrl] = useState('');
-  const [nickname, setNickname] = useState('');
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  // ===== Auth state =====
+  const { auth, login, logout, online, setServerConfig } = useGameStore();
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authView, setAuthView] = useState<'login' | 'register'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authNickname, setAuthNickname] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // ===== Online room state =====
+  const [showOnlineCreate, setShowOnlineCreate] = useState(false);
+  const [onlineJoinCode, setOnlineJoinCode] = useState('');
+  const [serverHost, setServerHost] = useState(localStorage.getItem('server_host') || 'localhost');
+  const [serverPort, setServerPort] = useState(localStorage.getItem('server_port') || '3001');
+
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [showDevModal, setShowDevModal] = useState(false);
 
@@ -56,16 +78,118 @@ export default function Index() {
   const [botRevealed, setBotRevealed] = useState(false);
   const [skipToFinalRound, setSkipToFinalRound] = useState(false);
 
-  const handleChooseAvatar = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) { const url = URL.createObjectURL(file); setAvatarUrl(url); }
-  };
-
   const closeAllModals = () => {
-    setShowCreateModal(false); setShowJoinModal(false); setShowDevModal(false);
+    playSound('modal_close');
+    setShowJoinModal(false); setShowDevModal(false);
+    setShowAuthModal(false); setShowOnlineCreate(false);
   };
 
-  const openJoinModal = () => { setJoinRoomCode(''); setShowJoinModal(true); };
+  // ===== Auth API calls =====
+  const doLogin = async () => {
+    if (!authUsername || !authPassword) { setAuthError('请填写用户名和密码'); return; }
+    setAuthLoading(true); setAuthError('');
+    try {
+      const res = await fetch(`${getApiBase()}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: authUsername, password: authPassword }),
+      });
+      const data = await res.json();
+      if (data.error) { setAuthError(data.error); return; }
+      login(data.token, data.user.id, data.user.nickname, data.user.username);
+      setShowAuthModal(false);
+    } catch (e) {
+      setAuthError('无法连接服务器，请检查服务器地址');
+    } finally { setAuthLoading(false); }
+  };
+
+  const doRegister = async () => {
+    if (!authUsername || !authPassword || !authNickname) { setAuthError('请填写所有字段'); return; }
+    if (authUsername.length < 2) { setAuthError('用户名至少2个字符'); return; }
+    if (authPassword.length < 4) { setAuthError('密码至少4个字符'); return; }
+    setAuthLoading(true); setAuthError('');
+    try {
+      const res = await fetch(`${getApiBase()}/api/auth/register`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: authUsername, password: authPassword, nickname: authNickname }),
+      });
+      const data = await res.json();
+      if (data.error) { setAuthError(data.error); return; }
+      login(data.token, data.user.id, data.user.nickname, data.user.username);
+      setShowAuthModal(false);
+    } catch (e) {
+      setAuthError('无法连接服务器，请检查服务器地址');
+    } finally { setAuthLoading(false); }
+  };
+
+  const doLogout = () => { logout(); };
+
+  // ===== Online mode handlers =====
+  const goOnlineCreateRoom = async () => {
+    if (!auth.token) { setShowAuthModal(true); return; }
+    // Connect to server first
+    try {
+      await networkClient.connect(auth.token);
+    } catch {
+      setAuthError('连接服务器失败');
+      return;
+    }
+    // Subscribe to room events
+    const unsub1 = networkClient.onRoomState((players, config) => {
+      // Store room state for Room page
+      sessionStorage.setItem('onlineRoomPlayers', JSON.stringify(players));
+      sessionStorage.setItem('onlineRoomConfig', JSON.stringify(config));
+    });
+    const unsub2 = networkClient.onStateChange((state) => {
+      sessionStorage.setItem('onlineGameState', JSON.stringify(state));
+      navigate(`/game/online-${state.gameId}`);
+      unsub1(); unsub2();
+    });
+
+    networkClient.createRoom({
+      baseAmount, doubleType, smartShuffle, smartShuffleLevel,
+      totalRounds: 8, showHandCount: true,
+    });
+
+    // Wait briefly for room_created response
+    setTimeout(() => {
+      const code = networkClient.roomCode || '----';
+      sessionStorage.setItem('roomAction', 'create');
+      sessionStorage.setItem('onlineRoomCode', code);
+      sessionStorage.setItem('onlineRoomConfig', JSON.stringify({
+        baseAmount, doubleType, smartShuffle, smartShuffleLevel,
+        totalRounds: 8, showHandCount: true,
+      }));
+      navigate(`/room/${code}?online=1`);
+    }, 500);
+  };
+
+  const goOnlineJoinRoom = async () => {
+    if (onlineJoinCode.length < 4) return;
+    if (!auth.token) { setShowAuthModal(true); return; }
+    try {
+      await networkClient.connect(auth.token);
+    } catch {
+      setAuthError('连接服务器失败');
+      return;
+    }
+    networkClient.joinRoom(onlineJoinCode);
+    setTimeout(() => {
+      sessionStorage.setItem('roomAction', 'join');
+      sessionStorage.setItem('onlineRoomCode', onlineJoinCode);
+      sessionStorage.setItem('onlineRoomConfig', JSON.stringify({
+        baseAmount, doubleType, smartShuffle, smartShuffleLevel,
+        totalRounds: 8, showHandCount: true,
+      }));
+      navigate(`/room/${onlineJoinCode}?online=1`);
+    }, 500);
+  };
+
+  const saveServerConfig = () => {
+    setServerConfig(serverHost, serverPort);
+    playSound('click');
+  };
+
+  const openJoinModal = () => { playSound('modal_open'); setJoinRoomCode(''); setShowJoinModal(true); };
   const decBase = () => { if (baseAmount > 1) setBaseAmount(baseAmount - 1); };
   const incBase = () => setBaseAmount(baseAmount + 1);
 
@@ -86,11 +210,10 @@ export default function Index() {
     titleTimer.current = setTimeout(() => setTitleTapCount(0), 1000);
   }, [titleTapCount]);
 
-  const confirmCreateRoom = () => {
+  const goCreateRoom = () => {
     const config = { baseAmount, doubleType, smartShuffle, smartShuffleLevel };
     sessionStorage.setItem('roomConfig', JSON.stringify(config));
     sessionStorage.setItem('roomAction', 'create');
-    closeAllModals();
     navigate('/room/create');
   };
 
@@ -122,7 +245,7 @@ export default function Index() {
       totalRounds: skipToFinalRound ? 1 : 8,
     };
     const players = [
-      { openid: 'player_me', name: nickname || '我', avatarUrl, isBot: false },
+      { openid: 'player_me', name: '我', avatarUrl: '', isBot: false },
       ...devPlayers,
     ];
     const engine = new GameEngine();
@@ -241,36 +364,6 @@ export default function Index() {
       display: 'flex', flexDirection: 'column', alignItems: 'center',
       justifyContent: 'center', overflow: 'hidden', position: 'relative',
     }}>
-      {/* Profile */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 'clamp(16px, 4vh, 32px)' }}>
-        <label style={{
-          width: 'clamp(56px, 14vmin, 80px)', height: 'clamp(56px, 14vmin, 80px)',
-          borderRadius: '50%', background: S.bgCard,
-          border: '1px solid rgba(255,255,255,0.06)',
-          overflow: 'hidden', cursor: 'pointer',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          {avatarUrl ? (
-            <img src={avatarUrl} style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} alt="" />
-          ) : (
-            <span style={{ fontSize: 'clamp(26px, 6vmin, 40px)' }}>👤</span>
-          )}
-          <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleChooseAvatar} />
-        </label>
-        <input
-          style={{
-            width: 'clamp(160px, 40vmin, 240px)', height: 'clamp(30px, 6vmin, 38px)',
-            textAlign: 'center', fontSize: 'var(--fs-sm)', fontWeight: 600,
-            color: S.ink, background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.06)', borderRadius: 99,
-            padding: '0 16px', outline: 'none',
-          }}
-          placeholder="点击设置昵称"
-          value={nickname}
-          onChange={e => setNickname(e.target.value)}
-        />
-      </div>
-
       {/* Title */}
       <div style={{ textAlign: 'center', lineHeight: 1.1, cursor: 'pointer', userSelect: 'none' }} onClick={onTitleTap}>
         <span style={{
@@ -285,52 +378,120 @@ export default function Index() {
         }}>红三 · 坨坨牌</span>
       </div>
 
-      {/* Bottom buttons */}
+      {/* Bottom buttons — middle-lower area */}
       <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0,
         display: 'flex', gap: 'clamp(6px, 1.5vw, 10px)',
-        padding: 'clamp(10px, 2vh, 16px) clamp(10px, 4vw, 24px)',
-        paddingBottom: 'clamp(16px, 4vh, 28px)',
-        background: 'linear-gradient(to top, rgba(26,21,16,0.95), transparent)',
-        zIndex: 10,
+        marginTop: 'clamp(32px, 8vh, 64px)',
+        padding: '0 clamp(10px, 4vw, 24px)',
+        width: '100%', maxWidth: 'clamp(260px, 60vmin, 360px)',
       }}>
-        <button onClick={() => setShowCreateModal(true)}
+        <button onClick={() => { playSound('click'); goCreateRoom(); }}
           className="btn-game btn-primary"
           style={{ flex: 1, padding: 'clamp(10px, 2vh, 14px) 0', fontSize: 'var(--fs-base)', borderRadius: 'var(--radius-lg)' }}>
           创建房间
         </button>
-        <button onClick={openJoinModal}
+        <button onClick={() => { playSound('click'); openJoinModal(); }}
           className="btn-game btn-secondary"
           style={{ flex: 1, padding: 'clamp(10px, 2vh, 14px) 0', fontSize: 'var(--fs-base)' }}>
           加入游戏
         </button>
       </div>
 
-      {/* ===== Create Room Modal ===== */}
-      {showCreateModal && modalShell(closeAllModals,
-        <>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexShrink: 0 }}>
-            <span style={{ fontSize: 'var(--fs-md)', fontWeight: 800 }}>创建房间</span>
-            <button onClick={closeAllModals}
-              style={{ background: 'none', border: 'none', color: S.inkDim, fontSize: 20, cursor: 'pointer', padding: 4 }}>✕</button>
-          </div>
-          <div style={{ overflowY: 'auto', flex: 1 }}>
-            {settingRow('底注金额', stepper(baseAmount, decBase, incBase, '元'))}
-            {settingRow('翻法', segmented(['平翻', '陡翻'], doubleType === 'flat' ? '平翻' : '陡翻', v => setDoubleType(v === '平翻' ? 'flat' : 'steep')))}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'clamp(6px, 1.2vh, 10px) 0' }}>
-              <span style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: S.ink2 }}>坨坨牌</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {toggle(smartShuffle, () => setSmartShuffle(!smartShuffle))}
-                {smartShuffle && levelDots(smartShuffleLevel, setSmartShuffleLevel)}
-              </div>
+      {/* ===== Online Mode Section ===== */}
+      <div style={{
+        marginTop: 'clamp(20px, 5vh, 44px)',
+        padding: '0 clamp(10px, 4vw, 24px)',
+        width: '100%', maxWidth: 'clamp(260px, 60vmin, 360px)',
+      }}>
+        {/* Divider */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 'clamp(12px, 2.5vh, 18px)',
+        }}>
+          <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.08)' }} />
+          <span style={{ fontSize: 'var(--fs-xs)', color: S.inkDim, fontWeight: 700, letterSpacing: '0.1em' }}>联网对战</span>
+          <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.08)' }} />
+        </div>
+
+        {!auth.isLoggedIn ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button onClick={() => { setAuthView('login'); setAuthError(''); setShowAuthModal(true); }}
+              style={{
+                width: '100%', padding: 'clamp(8px, 1.5vh, 12px) 0',
+                borderRadius: 'var(--radius-lg)', border: '1px solid rgba(96,165,250,0.3)',
+                background: 'rgba(96,165,250,0.08)', color: '#60a5fa',
+                fontSize: 'var(--fs-sm)', fontWeight: 700, cursor: 'pointer',
+              }}>
+              🔑 登录 / 注册
+            </button>
+            {/* Server config */}
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              <input
+                value={serverHost} onChange={e => setServerHost(e.target.value)}
+                placeholder="服务器地址"
+                style={{
+                  flex: 1, padding: '4px 8px', background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.08)', borderRadius: 'var(--radius-sm)',
+                  color: S.inkDim, fontSize: '11px', outline: 'none',
+                }}
+              />
+              <input
+                value={serverPort} onChange={e => setServerPort(e.target.value)}
+                placeholder="3001"
+                style={{
+                  width: 48, padding: '4px 6px', background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.08)', borderRadius: 'var(--radius-sm)',
+                  color: S.inkDim, fontSize: '11px', outline: 'none', textAlign: 'center',
+                }}
+              />
+              <button onClick={saveServerConfig}
+                style={{
+                  padding: '4px 8px', borderRadius: 'var(--radius-sm)', fontSize: '11px',
+                  background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)',
+                  color: S.inkDim, cursor: 'pointer', fontWeight: 600,
+                }}>保存</button>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 'clamp(8px, 2vw, 12px)', marginTop: 12, flexShrink: 0 }}>
-            <button onClick={closeAllModals} className="btn-game btn-secondary" style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)' }}>取消</button>
-            <button onClick={confirmCreateRoom} className="btn-game btn-primary" style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)' }}>创建并等待</button>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {/* User info bar */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              background: 'rgba(240,168,40,0.06)', borderRadius: 'var(--radius-md)',
+              padding: '6px 12px', border: '1px solid rgba(240,168,40,0.12)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 14 }}>👤</span>
+                <span style={{ fontSize: 'var(--fs-sm)', fontWeight: 700, color: S.accent }}>{auth.nickname}</span>
+                <span style={{
+                  fontSize: 9, color: online.connectionStatus === 'connected' ? S.green : S.inkDim,
+                  padding: '1px 6px', borderRadius: 8,
+                  background: online.connectionStatus === 'connected' ? S.greenSoft : 'rgba(255,255,255,0.04)',
+                }}>
+                  {online.connectionStatus === 'connected' ? '在线' : '离线'}
+                </span>
+              </div>
+              <button onClick={doLogout}
+                style={{
+                  background: 'none', border: 'none', color: S.inkDim, fontSize: 'var(--fs-xs)',
+                  cursor: 'pointer', fontWeight: 600,
+                }}>退出</button>
+            </div>
+            {/* Online buttons */}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={goOnlineCreateRoom}
+                className="btn-game btn-primary"
+                style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)' }}>
+                🌐 创建在线房间
+              </button>
+              <button onClick={() => { setOnlineJoinCode(''); setShowOnlineCreate(true); }}
+                className="btn-game btn-secondary"
+                style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)' }}>
+                🔗 加入在线房间
+              </button>
+            </div>
           </div>
-        </>
-      )}
+        )}
+      </div>
 
       {/* ===== Join Room Modal ===== */}
       {showJoinModal && modalShell(closeAllModals,
@@ -376,6 +537,117 @@ export default function Index() {
             <button onClick={confirmJoinRoom} disabled={joinRoomCode.length < 4}
               className="btn-game btn-primary"
               style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)', opacity: joinRoomCode.length < 4 ? 0.4 : 1 }}>
+              加入房间
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ===== Auth Modal (Login/Register) ===== */}
+      {showAuthModal && modalShell(() => { setShowAuthModal(false); setAuthError(''); },
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexShrink: 0 }}>
+            <span style={{ fontSize: 'var(--fs-md)', fontWeight: 800 }}>
+              {authView === 'login' ? '登录' : '注册'}
+            </span>
+            <button onClick={() => { setShowAuthModal(false); setAuthError(''); }}
+              style={{ background: 'none', border: 'none', color: S.inkDim, fontSize: 20, cursor: 'pointer', padding: 4 }}>✕</button>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <input
+              value={authUsername} onChange={e => setAuthUsername(e.target.value)}
+              placeholder="用户名"
+              style={inputStyle}
+            />
+            {authView === 'register' && (
+              <input
+                value={authNickname} onChange={e => setAuthNickname(e.target.value)}
+                placeholder="昵称（游戏内显示）"
+                style={inputStyle}
+              />
+            )}
+            <input
+              type="password"
+              value={authPassword} onChange={e => setAuthPassword(e.target.value)}
+              placeholder="密码"
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  authView === 'login' ? doLogin() : doRegister();
+                }
+              }}
+              style={inputStyle}
+            />
+
+            {authError && (
+              <div style={{ fontSize: 'var(--fs-xs)', color: S.red, padding: '4px 8px', background: S.redSoft, borderRadius: 'var(--radius-sm)' }}>
+                {authError}
+              </div>
+            )}
+
+            <button
+              onClick={authView === 'login' ? doLogin : doRegister}
+              disabled={authLoading}
+              className="btn-game btn-primary"
+              style={{ width: '100%', padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)', opacity: authLoading ? 0.6 : 1 }}>
+              {authLoading ? '请稍候...' : (authView === 'login' ? '登录' : '注册')}
+            </button>
+
+            <button
+              onClick={() => { setAuthView(authView === 'login' ? 'register' : 'login'); setAuthError(''); }}
+              style={{
+                background: 'none', border: 'none', color: '#60a5fa', fontSize: 'var(--fs-xs)',
+                cursor: 'pointer', fontWeight: 600,
+              }}>
+              {authView === 'login' ? '没有账号？立即注册' : '已有账号？去登录'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ===== Online Join Room Modal ===== */}
+      {showOnlineCreate && modalShell(() => setShowOnlineCreate(false),
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexShrink: 0 }}>
+            <span style={{ fontSize: 'var(--fs-md)', fontWeight: 800 }}>加入在线房间</span>
+            <button onClick={() => setShowOnlineCreate(false)}
+              style={{ background: 'none', border: 'none', color: S.inkDim, fontSize: 20, cursor: 'pointer', padding: 4 }}>✕</button>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            {[0, 1, 2, 3].map(i => (
+              <div key={i} style={{
+                width: 'clamp(32px, 8vmin, 44px)', height: 'clamp(32px, 8vmin, 44px)',
+                border: '1px solid rgba(240,168,40,0.2)', borderRadius: 'var(--radius-md)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'rgba(255,255,255,0.03)',
+              }}>
+                <span style={{ fontSize: 'var(--fs-lg)', fontWeight: 900, color: S.accent }}>{onlineJoinCode[i] || ''}</span>
+              </div>
+            ))}
+          </div>
+          <input
+            type="text" inputMode="numeric"
+            style={{
+              width: '100%', padding: 'clamp(8px, 1.5vh, 12px)',
+              background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+              borderRadius: 'var(--radius-md)', color: S.ink,
+              fontSize: 'clamp(18px, 5vmin, 28px)', textAlign: 'center',
+              letterSpacing: '0.3em', outline: 'none',
+            }}
+            placeholder="输入4位房间号"
+            value={onlineJoinCode}
+            onChange={e => {
+              const val = e.target.value.replace(/\D/g, '').slice(0, 4);
+              setOnlineJoinCode(val);
+            }}
+            maxLength={4}
+            onKeyDown={e => { if (e.key === 'Enter') goOnlineJoinRoom(); }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button onClick={() => setShowOnlineCreate(false)} className="btn-game btn-secondary" style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)' }}>取消</button>
+            <button onClick={goOnlineJoinRoom} disabled={onlineJoinCode.length < 4}
+              className="btn-game btn-primary"
+              style={{ flex: 1, padding: 'clamp(8px, 1.5vh, 12px) 0', fontSize: 'var(--fs-sm)', opacity: onlineJoinCode.length < 4 ? 0.4 : 1 }}>
               加入房间
             </button>
           </div>
@@ -477,4 +749,14 @@ const stepperBtnStyle: React.CSSProperties = {
   border: '1px solid rgba(255,255,255,0.08)',
   fontSize: 16, cursor: 'pointer',
   display: 'flex', alignItems: 'center', justifyContent: 'center',
+};
+
+const inputStyle: React.CSSProperties = {
+  width: '100%', padding: 'clamp(8px, 1.5vh, 12px)',
+  background: 'rgba(255,255,255,0.04)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: 'var(--radius-md)',
+  color: 'var(--ink-primary)',
+  fontSize: 'var(--fs-sm)',
+  outline: 'none',
 };

@@ -1,11 +1,25 @@
-// Ported from HTML scoring logic
-// Fan calculation: bombs, double-lock, business mode bonuses
+import { HAND_TYPES } from './constants';
+import type { Card } from './card';
+import type { PlayInfo } from './analyzer';
 
-const HAND_TYPES = { SINGLE: 1, PAIR: 2, STRAIGHT: 3, BOMB: 4, H_BOMB: 5, CHE: 6 };
+export interface BombDetail {
+  playerId: number;
+  type: string;
+  fans: number;
+  rank: number;
+  cards: Card[];
+}
 
-function calculateFans(roundHistory, victoryReason, players) {
+export interface RoundHistoryEntry {
+  playerId: number;
+  type: number;
+  rank: number;
+  cards: Card[];
+}
+
+export function calculateFans(roundHistory: RoundHistoryEntry[], victoryReason: string, players: { id: number; finished: boolean; hand: Card[] }[]) {
   let bombFans = 0;
-  const bombDetails = [];
+  const bombDetails: BombDetail[] = [];
 
   roundHistory.forEach(round => {
     if (round.type === HAND_TYPES.BOMB) {
@@ -20,20 +34,15 @@ function calculateFans(roundHistory, victoryReason, players) {
   let extraFans = 0;
   let extraFansLabel = '';
 
-  // Double lock bonus
   if (victoryReason === '双关') {
     extraFans = 1;
     extraFansLabel = '双关';
   }
-
-  // Business mode bonus
   if (victoryReason === '业务胜利') {
     const notFinished = players.filter(p => !p.finished || p.hand.length > 0).length;
     extraFans = notFinished;
     extraFansLabel = '业务(关' + notFinished + '人)';
   }
-
-  // Business player lost (三家逃脱) — 3 fans
   if (victoryReason === '非业务玩家胜利') {
     extraFans = 3;
     extraFansLabel = '三家逃脱';
@@ -43,42 +52,60 @@ function calculateFans(roundHistory, victoryReason, players) {
   return { fans, bombFans, extraFans, extraFansLabel, bombDetails };
 }
 
-function calculateAmount(baseAmount, fans, doubleType) {
+export function calculateAmount(baseAmount: number, fans: number, doubleType: 'flat' | 'steep'): number {
   if (doubleType === 'steep') {
     return baseAmount * Math.pow(2, fans);
   }
-  // flat: base × (1 + fans)
   return baseAmount * (1 + fans);
 }
 
-/**
- * Calculate per-player settlement
- * Winning team takes from losing team
- */
-function calculateSettlement(players, victoryTeam, baseAmount, fans, doubleType, teamPotBonus, isBusinessMode, businessPlayerId) {
+export interface PlayerResult {
+  playerId: number;
+  name: string;
+  isRed3Team: boolean;
+  rank: number | null;
+  rankName: string;
+  pot: number;
+  won: number;
+  lost: number;
+  netWon: number;
+}
+
+export interface SettlementResult {
+  results: PlayerResult[];
+  amount: number;
+}
+
+export function calculateSettlement(
+  players: { id: number; name: string; isRed3Team: boolean; rank: number | null; pot: number }[],
+  victoryTeam: 'red' | 'black' | 'business',
+  baseAmount: number,
+  fans: number,
+  doubleType: 'flat' | 'steep',
+  teamPotBonus: Record<string, number> | null,
+  isBusinessMode: boolean,
+  businessPlayerId: number,
+): SettlementResult {
   const amount = calculateAmount(baseAmount, fans, doubleType);
   const rankNames = ['上游', '前中游', '后中游', '下游'];
 
-  const results = players.map(p => {
+  const results: PlayerResult[] = players.map(p => {
     let won = 0;
     let lost = 0;
 
     if (victoryTeam === 'business') {
-      // Business player wins: collects amount from each of 3 opponents
       if (p.id === businessPlayerId) {
         won = amount * 3;
       } else {
         lost = amount;
       }
     } else if (isBusinessMode) {
-      // Business player lost: pays amount to each of 3 opponents
       if (p.id === businessPlayerId) {
         lost = amount * 3;
       } else {
         won = amount;
       }
     } else {
-      // Normal 2v2: each player wins or loses exactly the round amount
       const isWinner = (victoryTeam === 'red' && p.isRed3Team) ||
                        (victoryTeam === 'black' && !p.isRed3Team);
       if (isWinner) {
@@ -99,23 +126,20 @@ function calculateSettlement(players, victoryTeam, baseAmount, fans, doubleType,
       }
     }
 
-    // Add individual pot
     const potAmount = p.pot || 0;
 
     return {
       playerId: p.id,
-      name: ['玩家', '玩家A', '玩家B', '玩家C'][p.id],
+      name: p.name,
       isRed3Team: p.isRed3Team,
       rank: p.rank,
       rankName: p.rank ? rankNames[p.rank - 1] : '?',
       pot: potAmount,
       won,
       lost,
-      netWon: won - lost
+      netWon: won - lost,
     };
   });
 
   return { results, amount };
 }
-
-export { calculateFans, calculateAmount, calculateSettlement, HAND_TYPES };

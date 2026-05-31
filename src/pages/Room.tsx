@@ -1,6 +1,9 @@
-import { useState, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useCallback, useEffect } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import GameEngine from '../engine/gameEngine';
+import { playSound } from '../lib/sound';
+import { networkClient } from '../network/NetworkGameClient';
+import { useGameStore } from '../stores/gameStore';
 
 interface Player {
   openid: string;
@@ -21,23 +24,30 @@ const ROUND_OPTIONS = [
 export default function Room() {
   const { roomCode: paramCode } = useParams<{ roomCode: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isOnline = searchParams.get('online') === '1';
+  const auth = useGameStore(s => s.auth);
 
   const savedConfig = (() => {
-    try { return JSON.parse(sessionStorage.getItem('roomConfig') || '{}'); } catch { return {}; }
+    try {
+      if (isOnline) return JSON.parse(sessionStorage.getItem('onlineRoomConfig') || '{}');
+      return JSON.parse(sessionStorage.getItem('roomConfig') || '{}');
+    } catch { return {}; }
   })();
   const action = sessionStorage.getItem('roomAction') || 'create';
-  const code = paramCode || sessionStorage.getItem('joinCode') || '----';
+  const code = paramCode || sessionStorage.getItem('joinCode') || sessionStorage.getItem('onlineRoomCode') || '----';
 
-  const [roomCode] = useState(code);
-  const [isOwner] = useState(action === 'create');
+  const [roomCode, setRoomCode] = useState(code);
+  const [isOwner, setIsOwner] = useState(isOnline ? (action === 'create') : (action === 'create'));
+  const [onlineOwnerId, setOnlineOwnerId] = useState<number>(0);
   const [ownerId] = useState(action === 'create' ? 'player_me' : '');
   const [players, setPlayers] = useState<Player[]>(() => {
-    if (action === 'create') {
+    if (!isOnline && action === 'create') {
       return [{ openid: 'player_me', name: '房主', avatarUrl: '', isBot: false, seat: 0, ready: true }];
     }
     return [];
   });
-  const [myReady, setMyReady] = useState(action === 'create');
+  const [myReady, setMyReady] = useState(isOnline ? false : (action === 'create'));
   const [baseAmount, setBaseAmount] = useState(savedConfig.baseAmount || 5);
   const [doubleType, setDoubleType] = useState<'flat' | 'steep'>(savedConfig.doubleType || 'flat');
   const [smartShuffle, setSmartShuffle] = useState(savedConfig.smartShuffle || false);
@@ -45,11 +55,81 @@ export default function Room() {
   const [roundCount, setRoundCount] = useState(8);
   const [showHandCount, setShowHandCount] = useState(savedConfig.showHandCount !== false);
 
-  const allReady = players.length === 4 && players.every(p => p.ready);
+  const allReady = players.length === 4 && players.every(p => p.ready || p.isBot);
   const diamondCost = ROUND_OPTIONS.find(o => o.rounds === roundCount)?.cost || 2;
 
+  // ===== Online mode: subscribe to room state =====
+  useEffect(() => {
+    if (!isOnline) return;
+
+    // Try to load existing players from sessionStorage
+    try {
+      const saved = sessionStorage.getItem('onlineRoomPlayers');
+      if (saved) {
+        const plist = JSON.parse(saved);
+        setPlayers(plist.map((p: any) => ({
+          openid: 'user_' + p.userId,
+          name: p.name,
+          avatarUrl: '',
+          isBot: false,
+          seat: p.seat,
+          ready: p.ready,
+        })));
+      }
+    } catch {}
+
+    const unsub = networkClient.onRoomState((plist, config, ownerId) => {
+      const mapped = plist.map(p => ({
+        openid: 'user_' + p.userId,
+        name: p.name,
+        avatarUrl: '',
+        isBot: p.isBot || false,
+        seat: p.seat,
+        ready: p.ready,
+      }));
+      setPlayers(mapped);
+      // Persist to sessionStorage
+      try { sessionStorage.setItem('onlineRoomPlayers', JSON.stringify(mapped)); } catch {}
+      // Determine if current user is owner
+      if (ownerId !== undefined) {
+        setOnlineOwnerId(ownerId);
+        setIsOwner(auth.userId === ownerId);
+      }
+      // Sync my ready state
+      const me = plist.find(p => p.userId === auth.userId);
+      if (me) setMyReady(me.ready);
+      // Save room code
+      const savedRoomCode = sessionStorage.getItem('onlineRoomCode');
+      if (!savedRoomCode && networkClient.roomCode) {
+        setRoomCode(networkClient.roomCode);
+        sessionStorage.setItem('onlineRoomCode', networkClient.roomCode);
+      }
+      if (config) {
+        setBaseAmount(config.baseAmount);
+        setDoubleType(config.doubleType);
+        setSmartShuffle(config.smartShuffle);
+        setSmartShuffleLevel(config.smartShuffleLevel);
+        setRoundCount(config.totalRounds);
+        setShowHandCount(config.showHandCount);
+      }
+    });
+
+    // Listen for game start
+    const unsub2 = networkClient.onStateChange((state) => {
+      sessionStorage.setItem('onlineGameState', JSON.stringify(state));
+      navigate(`/game/online-${state.gameId}`);
+    });
+
+    return () => { unsub(); unsub2(); };
+  }, [isOnline, navigate]);
+
   const addBot = useCallback(() => {
+    if (isOnline) {
+      networkClient.addBot();
+      return;
+    }
     if (players.length >= 4) return;
+    playSound('room_join');
     const idx = players.length;
     const botNames = ['电脑A', '电脑B', '电脑C'];
     const newPlayer: Player = {
@@ -57,9 +137,13 @@ export default function Room() {
       isBot: true, seat: idx, ready: true,
     };
     setPlayers([...players, newPlayer]);
-  }, [players]);
+  }, [players, isOnline]);
 
   const toggleReady = () => {
+    if (isOnline) {
+      networkClient.setReady();
+      return;
+    }
     if (isOwner) return;
     setPlayers(players.map(p =>
       p.openid === 'player_me' ? { ...p, ready: !myReady } : p
@@ -68,7 +152,12 @@ export default function Room() {
   };
 
   const startGame = () => {
+    if (isOnline) {
+      networkClient.startGame();
+      return;
+    }
     if (!allReady) return;
+    playSound('game_start');
     const config = { baseAmount, doubleType, smartShuffle, smartShuffleLevel, totalRounds: roundCount, showHandCount };
     const engine = new GameEngine();
     engine.createGame(players.map((p, i) => ({
@@ -81,7 +170,13 @@ export default function Room() {
     navigate(`/game/${engine._state.gameId}`);
   };
 
-  const leaveRoom = () => { navigate('/'); };
+  const leaveRoom = () => {
+    playSound('click');
+    if (isOnline) {
+      networkClient.leaveRoom();
+    }
+    navigate('/');
+  };
 
   // ===== RENDER =====
   return (
@@ -183,7 +278,7 @@ export default function Room() {
 
             {/* 显示手牌数量 */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'clamp(6px, 1.2vh, 10px) 0' }}>
-              <span style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--ink-secondary)' }}>手牌数量</span>
+              <span style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--ink-secondary)' }}>显示手牌数量</span>
               <button onClick={() => setShowHandCount(!showHandCount)}
                 style={{
                   width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
@@ -242,7 +337,13 @@ export default function Room() {
             {[0, 1, 2, 3].map(seatIdx => {
               const player = players[seatIdx];
               if (player) {
-                const ready = player.openid === ownerId ? true : (player.ready || false);
+                const isMe = isOnline
+                  ? (player.openid === 'user_' + auth.userId)
+                  : (player.openid === 'player_me' || player.openid === ownerId);
+                const isOwnerSeat = player.openid === ownerId;
+                const ready = isOnline
+                  ? (player.ready)
+                  : (player.openid === ownerId ? true : (player.ready || false));
                 return (
                   <div key={seatIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
                     <div style={{
@@ -250,10 +351,10 @@ export default function Room() {
                       borderRadius: '50%', background: 'var(--bg-card)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       fontSize: 'clamp(22px, 6vmin, 34px)',
-                      border: ready && player.openid !== ownerId
+                      border: ready && !isOwnerSeat
                         ? '2px solid var(--green)'
                         : '2px solid rgba(255,255,255,0.06)',
-                      boxShadow: ready && player.openid !== ownerId
+                      boxShadow: ready && !isOwnerSeat
                         ? '0 0 10px rgba(122,184,126,0.15)'
                         : 'none',
                       position: 'relative', overflow: 'hidden',
@@ -261,9 +362,9 @@ export default function Room() {
                       {player.avatarUrl ? (
                         <img src={player.avatarUrl} style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} alt="" />
                       ) : (
-                        <span>{player.isBot ? '🤖' : '👤'}</span>
+                        <span>{player.isBot ? '🤖' : (isMe ? '⭐' : '👤')}</span>
                       )}
-                      {ready && player.openid !== ownerId && (
+                      {ready && !isOwnerSeat && (
                         <div style={{
                           position: 'absolute', bottom: 0, left: 0, right: 0,
                           background: 'rgba(0,0,0,0.7)', padding: '1px 0',
@@ -273,9 +374,12 @@ export default function Room() {
                         </div>
                       )}
                     </div>
-                    <span style={{ fontSize: 'var(--fs-xs)', fontWeight: 600, color: 'var(--ink-secondary)' }}>{player.name}</span>
+                    <span style={{ fontSize: 'var(--fs-xs)', fontWeight: 600, color: 'var(--ink-secondary)' }}>
+                      {player.name}
+                      {isMe ? ' (我)' : ''}
+                    </span>
                     <div style={{ display: 'flex', gap: 4 }}>
-                      {player.openid === ownerId && <span style={badgeStyle('owner')}>房主</span>}
+                      {isOwnerSeat && <span style={badgeStyle('owner')}>房主</span>}
                       {player.isBot && <span style={badgeStyle('bot')}>电脑</span>}
                     </div>
                   </div>
@@ -300,7 +404,7 @@ export default function Room() {
             display: 'flex', gap: 8, justifyContent: 'center',
             padding: 'clamp(6px, 1.5vh, 12px) 0', flexShrink: 0,
           }}>
-            {!isOwner && (
+            {!isOwner && !isOnline && (
               <button onClick={toggleReady}
                 className="btn-game"
                 style={{
@@ -312,7 +416,44 @@ export default function Room() {
                 }}
               >{myReady ? '✓ 已准备' : '点击准备'}</button>
             )}
-            {isOwner && players.length < 4 && (
+            {/* Online mode: all non-owner players get ready button */}
+            {!isOwner && isOnline && (
+              <button onClick={toggleReady}
+                className="btn-game"
+                style={{
+                  flex: 1, padding: 'clamp(8px, 1.8vh, 12px) 0',
+                  fontSize: 'var(--fs-sm)', borderRadius: 'var(--radius-lg)',
+                  background: myReady ? 'var(--green-soft)' : 'rgba(96,165,250,0.12)',
+                  color: myReady ? 'var(--green)' : '#60a5fa',
+                  border: myReady ? '1px solid rgba(122,184,126,0.25)' : '1px solid rgba(96,165,250,0.2)',
+                }}
+              >{myReady ? '✓ 已准备' : '点击准备'}</button>
+            )}
+            {/* Online mode: owner also gets ready button */}
+            {isOwner && isOnline && (
+              <button onClick={toggleReady}
+                className="btn-game"
+                style={{
+                  flex: 1, padding: 'clamp(8px, 1.8vh, 12px) 0',
+                  fontSize: 'var(--fs-sm)', borderRadius: 'var(--radius-lg)',
+                  background: myReady ? 'var(--green-soft)' : 'rgba(96,165,250,0.12)',
+                  color: myReady ? 'var(--green)' : '#60a5fa',
+                  border: myReady ? '1px solid rgba(122,184,126,0.25)' : '1px solid rgba(96,165,250,0.2)',
+                }}
+              >{myReady ? '✓ 已准备' : '点击准备'}</button>
+            )}
+            {(isOwner && !isOnline && players.length < 4) && (
+              <button onClick={addBot}
+                className="btn-game"
+                style={{
+                  flex: 1, padding: 'clamp(8px, 1.8vh, 12px) 0',
+                  fontSize: 'var(--fs-sm)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--green-soft)', color: 'var(--green)',
+                  border: '1px solid rgba(122,184,126,0.2)',
+                }}
+              >🤖 添加电脑</button>
+            )}
+            {(isOwner && isOnline && players.length < 4) && (
               <button onClick={addBot}
                 className="btn-game"
                 style={{

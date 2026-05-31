@@ -381,6 +381,10 @@ html, body, #root {
   from { transform: scale(1); box-shadow: 0 0 4px rgba(196,107,107,0.3); }
   to { transform: scale(1.08); box-shadow: 0 0 14px rgba(196,107,107,0.6); }
 }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
 /* Hand scroll */
 .hand-scroll {
@@ -431,12 +435,12 @@ html, body, #root {
   flex: 1; min-width: 0;
   padding: clamp(8px, 2vh, 16px) clamp(8px, 2vw, 20px);
   border-right: 1px solid rgba(255,255,255,0.06);
-  display: flex; flex-direction: column; overflow-y: auto;
+  display: flex; flex-direction: column;
 }
 .settlement-right {
   flex: 1; min-width: 0;
   padding: clamp(8px, 2vh, 16px) clamp(8px, 2vw, 20px);
-  display: flex; flex-direction: column; overflow-y: auto;
+  display: flex; flex-direction: column;
 }
 .settlement-section-title {
   font-size: var(--fs-xs); font-weight: 800;
@@ -540,21 +544,61 @@ html, body, #root {
 .settlement-btn.primary { background: linear-gradient(135deg, #f0a828, #d4880f); color: #1a1510; }
 .settlement-btn.secondary { background: var(--bg-card); color: var(--ink-secondary); }
 
-/* ===== Managed Button ===== */
-.managed-btn {
-  position: absolute; bottom: clamp(6px, 2vh, 14px); left: clamp(6px, 2vw, 14px);
-  z-index: 25; cursor: pointer;
-  padding: clamp(4px, 1vh, 10px) clamp(8px, 2.5vw, 18px);
-  border-radius: 99px; font-weight: 700;
-  font-size: var(--fs-xs); border: none;
-  font-family: inherit; transition: all 0.2s;
-  background: rgba(255,255,255,0.06); color: var(--ink-secondary);
+/* ===== Settlement Bomb Section (full-width below columns) ===== */
+.settlement-bomb-section {
+  padding: clamp(6px, 1.5vh, 14px) clamp(8px, 2vw, 20px);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
 }
-.managed-btn.managed-active {
-  background: var(--green); color: #fff;
+.settlement-bomb-section.expanded {
+  overflow-y: auto;
+  max-height: 32vh;
+}
+.bomb-section-header {
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none;
+  padding: 2px 0;
+  transition: opacity 0.15s;
+}
+.bomb-section-header:hover {
+  opacity: 0.8;
+}
+.bomb-detail-list {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.bomb-player-group {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.bomb-player-summary {
+  display: flex; align-items: baseline; gap: 6px;
+}
+.bomb-player-name {
+  font-size: var(--fs-sm); font-weight: 700; color: var(--ink-primary);
+}
+.bomb-player-stat {
+  font-size: var(--fs-xs); color: var(--accent); font-weight: 700;
+}
+.bomb-cards-row {
+  display: flex; flex-direction: row; flex-wrap: wrap;
+  gap: 4px 10px; padding-left: 2px;
+}
+.bomb-entry {
+  display: flex; align-items: center; gap: 3px;
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px 2px 2px;
+}
+.bomb-entry-cards {
+  display: flex; gap: 1px; align-items: center;
+}
+.bomb-entry-label {
+  font-size: calc(var(--fs-xs) * 0.85);
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-/* ===== Score Panel Button ===== */
+/* ===== Bottom-Right Button Group ===== */
 .score-panel-btn {
   position: absolute; bottom: clamp(6px, 2vh, 14px); right: clamp(6px, 2vw, 14px);
   z-index: 25; cursor: pointer;
@@ -563,6 +607,11 @@ html, body, #root {
   border: 1px solid rgba(255,255,255,0.06);
   border-radius: var(--radius-md);
   padding: 4px 10px;
+  transition: all 0.2s;
+}
+.score-panel-btn.managed-active {
+  border-color: rgba(122,184,126,0.3);
+  box-shadow: 0 0 8px rgba(122,184,126,0.12);
 }
 .score-btn-icon { font-size: var(--fs-md); line-height: 1; }
 .score-btn-label { font-size: 9px; color: var(--ink-dim); font-weight: 700; }

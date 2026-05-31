@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  hongsan-server:
+    build: .
+    container_name: hongsan-server
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data:/app/data          # SQLite database persistence
+    environment:
+      - PORT=3001
+      - JWT_SECRET=change-this-to-a-random-secret-in-production
+      - DB_PATH=/app/data/hongsan.db
+    restart: unless-stopped

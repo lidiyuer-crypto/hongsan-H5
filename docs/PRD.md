@@ -1,8 +1,8 @@
 # 找兄弟(红三/坨坨牌) H5版 · 产品需求文档
 
-> 最后更新: 2026-05-29
-> 版本: v1.1
-> 状态: 开发中 — UI重构完成(浮动玻璃态)、拖拽选牌完善、实时番数统计
+> 最后更新: 2026-05-30
+> 版本: v1.2
+> 状态: 开发中 — 联网对战模式(α测试) + UI重构(浮动玻璃态) + 拖拽选牌完善
 
 ---
 
@@ -14,19 +14,25 @@
 ### 1.2 技术栈
 | 层 | 技术 |
 |---|------|
-| 框架 | React 19 + TypeScript |
+| 前端框架 | React 19 + TypeScript |
 | 构建 | Vite 8 + Rolldown |
 | 路由 | react-router-dom v7 |
-| 样式 | Tailwind CSS 4 + 自定义 CSS 变量 |
-| 状态 | zustand 5 (stores) + React useState |
+| 样式 | 自定义 CSS 变量 + inline style (暖暗游戏厅设计) |
+| 状态 | zustand 5 + React useState |
 | 引擎 | 纯 TypeScript 移植自小程序 engine/ |
+| **后端运行时** | **Bun 1.3** (原生 TS + WebSocket + SQLite) |
+| **HTTP框架** | **Hono** |
+| **数据库** | **SQLite** (bun:sqlite + Drizzle ORM) |
+| **认证** | **bcryptjs + JWT** |
+| **部署** | **Docker Compose** (NAS 自托管) |
 
 ### 1.3 代码规模
-- 页面: 3个 (Index/Room/Game)
-- 引擎: 6个JS模块 + 1个barrel (gameEngine/analyzer/scoring/deck/victory/constants)
+- 页面: 3个 (Index/Room/Game) + 网络层 (NetworkGameClient)
+- 引擎: 6个JS模块 + 1个barrel
+- **服务端: ~1500行** (app/ws/GameRoom/engine/auth/db)
 - Store: 1个 (gameStore.ts)
-- CSS: ~600行设计系统 + 浮动玻璃态
-- 总计: ~2500行 TypeScript + JSX + CSS
+- CSS: ~600行设计系统
+- 总计: ~4500行 TypeScript + JSX + CSS (含服务端)
 
 ---
 
@@ -94,47 +100,71 @@
 ### 3.1 目录结构
 ```
 红三-H5/
-├── src/
-│   ├── main.tsx           # 入口
-│   ├── App.tsx            # 路由: / → /room/:code → /game/:id
-│   ├── index.css          # 暖暗游戏厅设计系统 (~560行)
+├── src/                    # 前端
+│   ├── main.tsx            # 入口
+│   ├── App.tsx             # 路由: / → /room/:code?online → /game/:id
+│   ├── index.css           # 暖暗游戏厅设计系统
 │   ├── pages/
-│   │   ├── Index.tsx      # 首页 (~280行)
-│   │   ├── Room.tsx       # 房间页 (~360行)
-│   │   └── Game.tsx       # 游戏页 (~1350行)
-│   ├── engine/
-│   │   └── (小程序 engine/ 的 TS 复刻，挂载到 engine.ts)
-│   ├── lib/
-│   │   └── engine.ts      # 游戏引擎 (纯逻辑，无UI依赖)
+│   │   ├── Index.tsx       # 首页 (本地+联网入口、登录/注册)
+│   │   ├── Room.tsx        # 房间页 (在线/本地双模式)
+│   │   └── Game.tsx        # 游戏页 (~1500行, 在线/本地双模式)
+│   ├── engine/             # 游戏引擎 (小程序移植)
+│   ├── lib/                # barrel export + sound
+│   ├── network/            # 联网层 (新增)
+│   │   ├── NetworkGameClient.ts  # WebSocket 客户端单例
+│   │   └── types.ts              # WebSocket 协议类型
 │   └── stores/
-│       └── gameStore.ts   # zustand store
-├── design-demo/
-│   └── warm-game-room.html # 设计原型 (视觉参考)
-├── docs/
-│   └── PRD.md             # 本文档
-├── package.json
-└── vite.config.ts
+│       └── gameStore.ts    # zustand (auth/connection/online)
+├── server/                 # 服务端 (新增, 独立目录)
+│   ├── index.ts            # Bun.serve 入口 (HTTP + WS)
+│   └── src/
+│       ├── app.ts          # Hono 路由 + 房间管理 + WS消息处理
+│       ├── auth/           # bcrypt + JWT 认证
+│       ├── db/             # SQLite + Drizzle (schema/migrate)
+│       ├── ws/handler.ts   # WebSocket 连接管理 + 心跳
+│       ├── game/GameRoom.ts # 服务端权威游戏调度器 (~1050行)
+│       └── engine/         # 服务端 TS 版引擎
+├── docs/PRD.md
+└── CLAUDE.md
 ```
 
 ### 3.2 路由设计
 | 路径 | 页面 | 说明 |
 |------|------|------|
-| `/` | Index | 首页 — 创建/加入房间 |
-| `/room/:roomCode` | Room | 房间页 — 配置+座位+开始 |
-| `/game/:gameId` | Game | 游戏页 — 核心对战 |
+| `/` | Index | 首页 — 本地/联网入口、登录注册 |
+| `/room/:roomCode?online=1` | Room | 联网房间 (WebSocket 同步) |
+| `/room/:roomCode` | Room | 本地房间 (sessionStorage 同步) |
+| `/game/online-:gameId` | Game | 联网对战 |
+| `/game/:gameId` | Game | 本地对战 |
 
-### 3.3 数据流 (本地单机模式)
+### 3.3 数据流
+
+**本地模式 (不变)**:
 ```
 Index → sessionStorage('roomConfig') → Room
 Room → new GameEngine() → sessionStorage('localGame') → Game
 Game → engine.getStateForPlayer(0) → renderGameState() → setGameUI()
 ```
 
+**联网模式 (新增)**:
+```
+Index → register/login (REST) → JWT → NetworkGameClient.connect(token)
+  → ws://host:3001/ws (auth) → create_room / join_room → room_state
+Room → room_state 广播 → 玩家列表实时同步
+  → ready → start_game → game_state (per-player filtered)
+Game → game_state → renderOnlineGameState() → setGameUI()
+  → play_cards/pass/che_action → 服务端验证 → broadcast → game_state 更新
+```
+
 ### 3.4 关键设计决策
-- **单文件 engine.ts**: 将小程序 engine/ 下6个模块合并为1个 TS 文件，减少模块间依赖复杂度
-- **gameUI 单状态对象**: 镜像小程序的 `this.data` 模式，一个 `renderGameState()` 组装所有 UI 数据
-- **inline style**: 所有组件使用 inline style + CSS 变量，避免 CSS Modules 的命名冲突和动态样式问题
-- **单机本地模式**: 无后端、无数据库、无云函数，4人全是本地 (1人类 + 3 bot)
+- **单文件 engine.ts**: 将小程序 engine/ 下6个模块合并为1个 TS 文件
+- **gameUI 单状态对象**: 镜像小程序的 `this.data` 模式
+- **inline style**: 所有组件使用 inline style + CSS 变量
+- **服务端权威**: 在线模式所有出牌由服务端验证，防作弊
+- **独立 server/ 目录**: 不搞 monorepo，server 是独立 Bun 项目
+- **双模式共存**: Game.tsx 同时处理 `isOnline` 和本地模式，共享 UI 组件
+- **WebSocket JSON 协议**: 15种客户端→服务端消息，12种服务端→客户端消息
+- **视角过滤**: 服务端 `getStateForPlayer(seat)` 仅发送该玩家完整手牌
 
 ---
 
@@ -288,20 +318,22 @@ class GameEngine {
 ## 8. 已知限制 & 待开发
 
 ### 8.1 当前限制
-- **纯单机模式**: 无后端、无网络同步、无多人对战
-- **Bot AI**: 基础AI (单张最小压/最大保、对子顺序搜索、炸弹级联)
-- **无经济系统**: 无虚拟币、无充值、无消耗扣除
-- **无账号系统**: 头像昵称仅存储于 sessionStorage
+- **联网模式 α 阶段**: 基本流程可走通(注册→创建房间→Bot补齐→对战)，但有多项待完善
+- **Bot AI**: 基础AI (60%扯牌概率，选最弱有效牌型)
+- **无经济系统**: 无虚拟币、无充值、钻石消耗仅为UI展示
+- **断线重连**: 已实现 60s 宽限期 + 指数退避重连，但恢复接管逻辑待验证
 
 ### 8.2 计划中的功能
-- [ ] 联网版后端 (Node.js/WebSocket)
-- [ ] 房间码真随机 + 房间管理
-- [ ] 用户系统 (注册/登录/积分)
+- [x] ~~联网版后端 (Bun + WebSocket)~~ ✅ v1.2
+- [x] ~~房间码4位 + 房间管理~~ ✅ v1.2
+- [x] ~~用户系统 (注册/登录)~~ ✅ v1.2
+- [x] ~~在线Bot补齐~~ ✅ v1.2
+- [ ] 在线房间: 踢人、房间设置修改、观战
 - [ ] Bot AI升级 (蒙特卡洛/胜率评估)
-- [ ] 音效系统 (出牌/炸弹/扯牌)
 - [ ] 动画增强 (牌飞行动画/粒子特效)
 - [ ] PWA 支持 (离线可用/添加到桌面)
-- [ ] NAS 部署方案
+- [ ] NAS 部署 (Docker Compose + 端口转发 + DDNS + SSL)
+- [ ] 服务端单元测试 + 集成测试
 
 ---
 
@@ -325,17 +357,19 @@ npm run preview
 
 ## 10. 与小程序版的差异
 
-| 方面 | 微信小程序 | H5版 |
+| 方面 | 微信小程序 | H5版 v1.2 |
 |------|----------|------|
 | 框架 | 原生 WXML/WXSS/JS | React 19 + TypeScript |
-| 后端 | 微信云开发 (云函数+DB) | 无 (纯前端单机) |
-| 联网 | 云DB watch实时同步 | 无 |
+| 后端 | 微信云开发 (云函数+DB) | **Bun + Hono + SQLite** |
+| 联网 | 云DB watch实时同步 | **WebSocket JSON 协议** |
 | 支付 | 微信支付 | 无 |
 | 样式 | rpx/vmin 横屏适配 | CSS clamp() 响应式 |
-| 引擎 | 6个独立JS模块 | 1个合并TS文件 |
+| 引擎 | 6个独立JS模块 | 1个合并TS文件 (客户端) + TS复制 (服务端) |
 | 设计 | 绿色金边暗色 | 暖暗棕琥珀色 |
 | 选牌 | 微信touch事件 | DOM touch+mouse事件 |
 | 组件 | playing-card 自定义组件 | React inline style |
+| **服务端权威** | 云端验证 | **Bun GameRoom 权威调度** |
+| **房间** | 云DB | **内存 Map + room_state 广播** |
 
 ---
 

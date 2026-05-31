@@ -1,0 +1,50 @@
+version: "3.8"
+
+# ===== 找兄弟(红三) H5 — NAS 部署 =====
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 查看日志: docker compose logs -f
+
+services:
+  # --- Bun 游戏服务器 (API + WebSocket) ---
+  server:
+    build: ./server
+    container_name: hongsan-server
+    volumes:
+      # SQLite 数据库持久化到 NAS 宿主机
+      - ./server/data:/app/data
+    environment:
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET:-change-this-to-a-random-secret}
+    restart: unless-stopped
+    networks:
+      - hongsan
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # --- Nginx 反向代理 (静态文件 + SSL 终端) ---
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    container_name: hongsan-nginx
+    ports:
+      # 飞牛/群晖管理界面占用了 80/443，默认用 8080
+      # 如果改了管理界面端口或想用反代，可改为 "80:80"
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      # SSL 证书持久化 (Let's Encrypt)
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - hongsan
+
+networks:
+  hongsan:
+    driver: bridge

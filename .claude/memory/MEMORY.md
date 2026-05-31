@@ -5,3 +5,6 @@
 - [H5引擎绕过陷阱](h5-engine-bypass-trap.md) — 调calculateSettlement绕过engine.getSettlement()导致积分不累计
 - [H5配置传递管线](h5-config-passthrough-pipeline.md) — 新配置字段需触达6个位置，漏任一即静默失败
 - [H5 React事件冒泡](h5-react-bubbling-selection.md) — click冒泡触发父容器清空选区，stopPropagation=小程序catchtap
+- [在线Bot支持](online-bot-support.md) — 房间bot补齐、负值userId、isBot贯穿全流程、bot出牌调度 (2026-05-30)
+- [扯牌阶段无限循环](online-che-phase-loop.md) — roundHasCheHappened旗标管理、bot穿透出牌、cheAction缺startTimer (2026-05-30)
+- [出牌静默失败](online-silent-action-failure.md) — doPlay无反馈、action_result不展示、flashError toast机制 (2026-05-30)
