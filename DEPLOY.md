@@ -24,23 +24,64 @@
 ```
 > 飞牛/群晖管理界面默认占用 80/443，所以容器暴露 8080/8443。详见下方"飞牛 OS 特别说明"。
 
-## 快速开始（3 步）
+## 分支策略
 
-```bash
-# 1. 把项目拷贝到 NAS
-#    在 NAS 上找个目录，比如 /volume1/docker/hongsan/
-scp -r . your-nas-user@nas-ip:/volume1/docker/hongsan/
-
-# 2. 设置 JWT 密钥
-cd /volume1/docker/hongsan/
-cp server/.env.example server/.env
-# 编辑 server/.env，把 JWT_SECRET 改成随机字符串
-
-# 3. 启动
-docker compose up -d
+```
+main   — 生产稳定分支 (NAS 运行此分支)
+master — 开发分支 (新功能先在此验证)
 ```
 
-打开 `http://你的NAS-IP` 就能玩了。
+**工作流**: 本地开发 → push `master` → NAS pull `master` → 验收通过 → merge 到 `main` → NAS 切换到 `main`
+
+```bash
+# 本地开发
+git checkout master
+# ... 写代码 ...
+git commit -m "feat: xxx"
+git push origin master
+
+# NAS 拉取测试
+ssh nas
+cd /vol1/docker/hongsan
+git checkout master
+git pull
+sudo docker compose build && sudo docker compose up -d
+# ... 测试验证 ...
+
+# 验收通过 → 合并到 main
+git checkout main
+git merge master
+git push origin main
+
+# NAS 切换到稳定版
+ssh nas
+cd /vol1/docker/hongsan
+git checkout main
+git pull
+sudo docker compose build && sudo docker compose up -d
+```
+
+## 快速开始（首次部署）
+
+```bash
+# 1. 在 GitHub 创建私有仓库，然后克隆到 NAS
+ssh your-nas-user@nas-ip
+mkdir -p /vol1/docker
+cd /vol1/docker
+git clone https://github.com/你的用户名/红三-H5.git hongsan
+cd hongsan
+git checkout main   # 使用稳定分支
+
+# 2. 设置 JWT 密钥和管理员密钥
+cp server/.env.example server/.env
+# 编辑 server/.env，修改 JWT_SECRET 和 ADMIN_KEY
+
+# 3. 启动
+sudo docker compose up -d
+```
+
+打开 `http://你的NAS-IP:8080` 就能玩了。
+管理后台: `http://你的NAS-IP:8080/admin?key=你的ADMIN_KEY`
 
 ---
 
@@ -51,12 +92,13 @@ docker compose up -d
 **方式 A：Git 克隆（推荐）**
 ```bash
 # SSH 进 NAS
-ssh admin@nas-ip
+ssh root@nas-ip
 
-# 克隆仓库
-cd /volume1/docker/
-git clone <你的仓库地址> hongsan
+# 克隆仓库（用你的 GitHub 仓库地址替换）
+cd /vol1/docker/
+git clone https://github.com/你的用户名/红三-H5.git hongsan
 cd hongsan
+git checkout main   # 稳定分支
 ```
 
 **方式 B：直接拷贝**
@@ -256,24 +298,60 @@ sudo netstat -tlnp | grep -E ':80|:443'
 
 ---
 
-## 升级指南
+## 日常更新（NAS 拉取部署）
+
+### 测试新功能（master 分支）
 
 ```bash
-# 1. 进入项目目录
-cd /volume1/docker/hongsan
+# 1. SSH 进 NAS
+ssh root@nas-ip
 
-# 2. 拉最新代码
+# 2. 进入项目目录
+cd /vol1/docker/hongsan
+
+# 3. 切到开发分支并拉取
+git checkout master
 git pull
 
-# 3. 重新构建并重启
-docker compose build
-docker compose up -d
+# 4. 重新构建并重启
+sudo docker compose build
+sudo docker compose up -d
 
-# 4. 查看日志确认正常
-docker compose logs -f --tail=20
+# 5. 看日志确认
+sudo docker compose logs -f --tail=20
+```
 
-# 5. 如果数据库 schema 有变化，需要迁移
-docker compose exec server bun run src/db/migrate.ts
+### 验收通过后上线（切换到 main）
+
+```bash
+# 1. 本地合并到 main
+git checkout main
+git merge master
+git push origin main
+
+# 2. NAS 切换到稳定版
+ssh root@nas-ip
+cd /vol1/docker/hongsan
+git checkout main
+git pull
+sudo docker compose build && sudo docker compose up -d
+```
+
+### 紧急回滚
+
+```bash
+# NAS 上回滚到上一个稳定版本
+cd /vol1/docker/hongsan
+git checkout main
+git pull
+sudo docker compose build && sudo docker compose up -d
+```
+
+### 数据库迁移
+
+```bash
+# 如果代码更新包含数据库 schema 变化
+sudo docker compose exec server bun run src/db/migrate.ts
 ```
 
 ---
