@@ -114,8 +114,9 @@ function getAdminHTML(key: string) {
     }
   } catch {}
 
-  // Active room list
-  const rooms = _roomManager.listRooms();
+  // Active room list (with null guard)
+  let rooms: any[] = [];
+  try { rooms = _roomManager?.listRooms() || []; } catch {}
   const roomRows = rooms.length > 0
     ? rooms.map(r => {
         const playerNames = r.players.map(p =>
