@@ -1,8 +1,8 @@
 # 找兄弟(红三/坨坨牌) H5版 · 产品需求文档
 
-> 最后更新: 2026-05-30
-> 版本: v1.2
-> 状态: 开发中 — 联网对战模式(α测试) + UI重构(浮动玻璃态) + 拖拽选牌完善
+> 最后更新: 2026-06-01
+> 版本: v1.3
+> 状态: 开发中 — GitHub同步 + NAS部署 + 管理后台 + Bug修复
 
 ---
 
@@ -24,15 +24,16 @@
 | **HTTP框架** | **Hono** |
 | **数据库** | **SQLite** (bun:sqlite + Drizzle ORM) |
 | **认证** | **bcryptjs + JWT** |
-| **部署** | **Docker Compose** (NAS 自托管) |
+| **部署** | **Docker Compose** (NAS 自托管) + **GitHub 同步** (main=稳定, master=开发) |
 
 ### 1.3 代码规模
 - 页面: 3个 (Index/Room/Game) + 网络层 (NetworkGameClient)
 - 引擎: 6个JS模块 + 1个barrel
-- **服务端: ~1500行** (app/ws/GameRoom/engine/auth/db)
+- **服务端: ~2000行** (app/ws/GameRoom/engine/auth/db/admin)
 - Store: 1个 (gameStore.ts)
 - CSS: ~600行设计系统
-- 总计: ~4500行 TypeScript + JSX + CSS (含服务端)
+- **部署**: Dockerfile.nginx + docker-compose.yml + nginx.conf + DEPLOY.md
+- 总计: ~5000+行 TypeScript + JSX + CSS + SQL (含服务端)
 
 ---
 
@@ -315,29 +316,82 @@ class GameEngine {
 - 始终显示 (含 0 番), 与桌面张子计数器并排
 
 ---
-## 8. 已知限制 & 待开发
+## 8. 部署架构 (v1.3)
 
-### 8.1 当前限制
-- **联网模式 α 阶段**: 基本流程可走通(注册→创建房间→Bot补齐→对战)，但有多项待完善
+### 8.1 GitHub 同步工作流
+```
+本地 → git push master → GitHub
+                              ↓
+NAS ← git pull master ← GitHub
+  ↓
+sudo docker compose build server && sudo docker compose up -d
+  ↓
+验收通过 → git merge master → git push main → NAS git pull main
+```
+
+### 8.2 分支策略
+| 分支 | 用途 | 部署目标 |
+|------|------|---------|
+| `master` | 开发分支 | NAS 测试环境 |
+| `main` | 生产稳定分支 | NAS 正式环境 |
+
+### 8.3 NAS 部署信息
+- **地址**: `http://192.168.110.43:8080`
+- **平台**: 飞牛 OS (Debian), Docker 28.5.2
+- **容器**: `hongsan-nginx` (nginx:alpine) + `hongsan-server` (oven/bun:1-alpine)
+- **管理后台**: `http://192.168.110.43:8080/admin?key=<ADMIN_KEY>`
+- **代码位置**: `/vol1/docker/hongsan/`
+- **数据库**: SQLite 文件 `/vol1/docker/hongsan/server/data/hongsan.db`
+
+### 8.4 环境变量
+```bash
+# 项目根目录 .env (docker-compose 读取)
+ADMIN_KEY=自行设置
+JWT_SECRET=自行设置
+```
+
+---
+
+## 9. 已知限制 & 待开发
+
+### 9.1 当前限制
+- **联网模式 β 阶段**: 基本对战可走通，但有多项已知 bug（见下）
+- **管理后台**: /admin 路由偶尔被 nginx SPA 拦截，需排查
 - **Bot AI**: 基础AI (60%扯牌概率，选最弱有效牌型)
 - **无经济系统**: 无虚拟币、无充值、钻石消耗仅为UI展示
-- **断线重连**: 已实现 60s 宽限期 + 指数退避重连，但恢复接管逻辑待验证
+- **断线重连**: 已实现 60s 宽限期 + 指数退避重连，恢复接管逻辑待验证
+- **GitHub 网络**: 中国地区需 `http.version=HTTP/1.1` 绕过 HTTP/2 连接问题
 
-### 8.2 计划中的功能
+### 9.2 已修复的 Bug (v1.3)
+- [x] 扯牌后 turn 指向自己→指向下家 `findNextPlayer`
+- [x] Bot pass 缺收章子检查→补充 pot collection 逻辑
+- [x] 身份揭示逻辑简化→完整 5 条件判断
+- [x] 双关判定按座位排序→按 rank 排序
+- [x] assignTeams mutation 丢失→传引用直接修改
+- [x] nginx.conf `/admin` 被 SPA 拦截→添加 location 块
+- [x] admin `_roomManager` 空引用→try-catch 保护
+- [x] 前端静默失败→flashError toast
+
+### 9.3 计划中的功能
 - [x] ~~联网版后端 (Bun + WebSocket)~~ ✅ v1.2
 - [x] ~~房间码4位 + 房间管理~~ ✅ v1.2
 - [x] ~~用户系统 (注册/登录)~~ ✅ v1.2
 - [x] ~~在线Bot补齐~~ ✅ v1.2
+- [x] ~~NAS 部署 (Docker Compose)~~ ✅ v1.3
+- [x] ~~GitHub 同步工作流~~ ✅ v1.3
+- [x] ~~管理后台~~ ✅ v1.3
+- [ ] 扯牌/Red3 卡死问题验证
+- [ ] 4 真人完整对局测试
 - [ ] 在线房间: 踢人、房间设置修改、观战
 - [ ] Bot AI升级 (蒙特卡洛/胜率评估)
 - [ ] 动画增强 (牌飞行动画/粒子特效)
 - [ ] PWA 支持 (离线可用/添加到桌面)
-- [ ] NAS 部署 (Docker Compose + 端口转发 + DDNS + SSL)
 - [ ] 服务端单元测试 + 集成测试
+- [ ] SSL 证书 (Let's Encrypt)
 
 ---
 
-## 9. 开发环境
+## 10. 开发环境
 
 ```bash
 # 安装
@@ -355,7 +409,7 @@ npm run preview
 
 ---
 
-## 10. 与小程序版的差异
+## 11. 与小程序版的差异
 
 | 方面 | 微信小程序 | H5版 v1.2 |
 |------|----------|------|
@@ -373,10 +427,12 @@ npm run preview
 
 ---
 
-## 11. 相关文档索引
+## 12. 相关文档索引
 
 - 微信小程序版 PRD: `../红三/docs/superpowers/specs/2026-05-25-zhaoxiongdi-app-design.md`
 - 微信小程序版 Plan: `../红三/docs/superpowers/plans/2026-05-25-zhaoxiongdi-app-plan.md`
 - 小程序 CLAUDE.md: `../红三/CLAUDE.md`
+- 部署指南: [DEPLOY.md](../DEPLOY.md) — NAS 部署 + GitHub 工作流 + 日常更新
 - 设计原型: `design-demo/warm-game-room.html`
 - Memory 系统: `~/.claude/projects/f-------Vibecoding---/memory/`
+- GitHub 仓库: https://github.com/lidiyuer-crypto/hongsan-H5
