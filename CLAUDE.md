@@ -2,7 +2,7 @@
 
 ## 项目概览
 微信小程序"找兄弟"的H5移植版。React 19 + TypeScript + Vite 8。
-**双模式**: 本地单机 (1人类+3 bot) + 联网对战 (Bun + WebSocket 服务端权威)。
+**纯在线模式**: Bun + WebSocket 服务端权威，bot 补齐。
 暖暗游戏厅设计。
 
 ## 启动
@@ -11,7 +11,7 @@
 npm run dev          # http://localhost:5173
 npm run build        # 类型检查 + 构建
 
-# 后端 (联网模式)
+# 后端
 cd server
 bun run index.ts     # http://localhost:3001 (HTTP/WS)
 ```
@@ -19,27 +19,40 @@ bun run index.ts     # http://localhost:3001 (HTTP/WS)
 ## 目录结构
 ```
 src/
-  main.tsx            — 入口
-  App.tsx             — 路由: / → /room/:code?online → /game/:id
-  index.css           — 暖暗游戏厅设计系统
+  main.tsx              — 入口
+  App.tsx               — 路由: / → /room/:code → /game/:id
+  index.css             — 暖暗游戏厅设计系统
   pages/
-    Index.tsx         — 首页(本地+联网入口, 登录/注册弹窗)
-    Room.tsx          — 房间页(在线/本地双模式, bot补齐)
-    Game.tsx          — 游戏页(~1500行, 在线/本地双模式, toast错误提示)
+    Index.tsx           — 首页(登录/注册 + 创建/加入在线房间)
+    Room.tsx            — 房间页(在线bot补齐, 房主可改设置)
+    Game.tsx            — 游戏页(~1220行, toast错误提示)
+  game/
+    types.ts            — GameUIState interface + cardDisplay/cardKey helpers
+    GameRenderer.ts     — computeGameUI(): 服务端GameStateData→前端UI状态
+    SettlementRenderer.ts — computeSettlementUI(): 结算数据→UI状态
   network/
     NetworkGameClient.ts — WebSocket客户端单例(连接/重连/心跳/消息路由)
-    types.ts             — WebSocket协议类型(15client+12server消息)
-  lib/engine.ts       — 游戏引擎(纯逻辑)
-  stores/gameStore.ts — zustand(auth/connection/online)
-server/               — 独立Bun项目
-  index.ts            — Bun.serve入口(HTTP+WS)
+    types.ts             — WebSocket协议类型
+  engine/               — 旧JS re-export wrapper (→ shared/engine/)
+  lib/engine.ts         — Barrel export (re-exports from shared/engine/)
+  stores/gameStore.ts   — zustand(auth/connection)
+
+shared/engine/          — 🏛️ 游戏引擎唯一源码 (前后端共享)
+  card.ts               — Card class + CardData type
+  constants.ts           — HAND_TYPES, POWER_LEVEL, RANK_DISPLAY, SUITS
+  analyzer.ts            — analyze/canBeat/generateAllValidPlays
+  deck.ts                — createFullDeck/smartShuffleDeal/normalDeal/assignTeams/adjustRed3sForTestMode
+  scoring.ts             — calculateFans/calculateAmount/calculateSettlement
+  GameState.ts           — 纯函数: executePlay/activateChePhase/endChePhase/collectPot/checkTeamVictory/checkGameOver/determineWinnerByPot/resetForNextRound + GameStateData/RoomConfig/GamePlayer types
+
+server/                  — 独立Bun项目
+  index.ts               — Bun.serve入口(HTTP+WS)
   src/
-    app.ts            — Hono路由 + RoomManager + WS消息处理
-    auth/index.ts     — bcrypt + JWT 注册/登录
-    db/               — SQLite + Drizzle(schema/migrate)
-    ws/handler.ts     — WebSocket连接管理 + 心跳 + 路由
-    game/GameRoom.ts  — 服务端权威游戏调度器(~1050行)
-    engine/           — 服务端TS版引擎(card/analyzer/deck/scoring/constants)
+    app.ts               — Hono路由 + RoomManager + WS消息处理 (含 update_config)
+    auth/index.ts        — bcrypt + JWT 注册/登录
+    db/                  — SQLite + Drizzle(schema/migrate)
+    ws/handler.ts        — WebSocket连接管理 + 心跳 + 路由
+    game/GameRoom.ts     — 服务端权威游戏调度器(~800行) + 内部BotController类
 ```
 
 ## 设计系统 — "暖暗游戏厅"
@@ -51,24 +64,23 @@ server/               — 独立Bun项目
 - 通用类: `.btn-game` `.btn-primary` `.btn-secondary` `.tag` `.card-face-el` `.card-back-el`
 
 ## 关键架构决策
-- **gameUI 单状态对象**: 镜像小程序 `this.data`，`renderGameState()` 组装所有UI数据
-- **engine.ts 单文件**: 将6个引擎模块合并为1个TS文件
-- **服务端权威**: 在线模式所有出牌由服务端验证(GameRoom)，客户端只发操作意图
-- **独立 server/ 目录**: 不搞 monorepo，server 是独立 Bun 项目
-- **双模式共存**: Game.tsx 同时处理 online/local，`isOnlineRef` 同步检查模式
-- **WebSocket JSON 协议**: 15种客户端→服务端消息 + 12种服务端→客户端消息
+- **shared/engine/ 统一引擎**: 前后端共享同一套游戏逻辑源码，消除双引擎分化
+- **src/engine/*.js re-export wrapper**: 向前兼容，实际代码在 shared/engine/*.ts
+- **服务端权威**: 所有出牌由服务端验证(GameRoom)，客户端只发操作意图
+- **纯函数提取**: `executePlay`/`checkTeamVictory`/`collectPot` 等纯状态变换在 GameState.ts，不依赖定时器/网络/DB
+- **BotController 内部类**: GameRoom 内的私有类，封装 bot AI 调度
+- **gameUI 单状态对象**: `GameUIState` interface (~100字段)，`computeGameUI()` 组装
+- **WebSocket JSON 协议**: 16种客户端→服务端消息(含 update_config) + 12种服务端→客户端消息
 - **视角过滤**: `getStateForPlayer(seat)` 仅发送该玩家完整手牌，对手只发 `handCount`
+- **纯在线模式 (Phase 5)**: 已删除本地模式，App 必须连接服务器。已删除文件: `src/engine/gameEngine.js`, `src/engine/victory.js`, `server/src/engine/`
 
 ## 数据流
-**本地模式**:
-```
-Index → sessionStorage('roomConfig') → Room → new GameEngine() → sessionStorage('localGame') → Game
-```
-**联网模式**:
 ```
 Index → POST /api/auth/register|login → JWT → ws://host:3001/ws (auth)
-  → create_room|join_room → room_state(广播) → ready → start_game
-  → game_state(per-player) → play_cards|pass|che → 服务端验证 → broadcast
+  → create_room(config) | join_room → room_state(广播) → update_config(房主改设置)
+  → ready → start_game → game_state(per-player)
+  → play_cards|pass|che → 服务端验证(GameState.ts纯函数) → broadcast
+  → checkTeamVictory|checkGameOver → settlement → next_round
 ```
 
 ## 联网模式常见陷阱
@@ -86,13 +98,25 @@ Index → POST /api/auth/register|login → JWT → ws://host:3001/ws (auth)
 - **cheAction() 后必须 startTurnTimer()**: 人类扯牌成功→出牌权转给扯牌者→需启动 timer
 
 ### 前端静默失败
-- **doPlay 5 处静默 return**: 现在全改为 `flashError('...')` toast 提示
-- **服务端 action_result error**: 现在通过 `onError` 订阅展示到 UI
+- **doPlay 静默 return**: 全部改为 `flashError('...')` toast 提示
+- **服务端 action_result error**: 通过 `onError` 订阅展示到 UI
 - **handleCheAction**: 必须防护 `!gs?.lastValidPlay` 防 null 引用
 
 ### 权限
 - **ownerId**: `room_state` 消息携带，用于前端判断房主身份
 - **add_bot 仅房主可调**: 服务端检查 `room.ownerId !== userId`
+- **update_config 仅房主可调**: 且游戏开始后拒绝修改
+
+### 章子统计陷阱
+- **checkGameOver 必须清空数组**: `tableCards/historyCards/pendingCollect` 否则 `collectPot` 定时器二次累加→章子翻倍
+- **scheduleCollect 加 status 守卫**: `if (game.status !== 'playing') return` 双重保护
+
+### 牌背渲染
+- **faceDown 不与 revealed 绑定**: 身份揭示(出红三)≠牌面朝上。faceDown 仅游戏结束(`status==='finished'`)时变 false
+
+### 配置传递
+- **update_config 同步**: Room.tsx useEffect 监听所有设置项，房主修改即发 `update_config` WS 消息
+- **新配置字段管线**: Room state→update_config→GameRoom.config→createInitialGameState→GameStateData→broadcastGameState→computeGameUI→JSX
 
 ## 游戏机制 (完整保留自小程序)
 - 4人局2v2红三/黑三阵营，52张牌(4-16点)
@@ -111,13 +135,8 @@ Index → POST /api/auth/register|login → JWT → ws://host:3001/ws (auth)
 - **e.touches[0].x不存在**: 微信小程序中不存在，用`pageX`。H5的mouse事件直接用`e.pageX`
 
 ### 状态管理
-- **轮询/重渲染覆盖选区**: `renderGameState`会覆盖`myHand`，必须从旧`myHand`建立cardKey→isSelected的Map保留
-- **引擎方法绕过**: 不直接调`calculateSettlement()`等内部纯函数，应通过`engine.getSettlement()`公共方法。直接调纯函数绕过`_scoresStored`和`accumulatedScores`状态管理→积分永不累计
+- **轮询/重渲染覆盖选区**: `computeGameUI`会覆盖`myHand`，必须从旧`myHand`建立cardKey→isSelected的Map保留
 - **`_doAction()` 后强制 `_lastTurnIndex = -1`**: 同步bot loop可能让turnIndex绕回→计时器不重启
-
-### 配置传递
-- **新配置字段6层管线**: Room state→config对象→sessionStorage→Game init(含fallback默认值)→GameUI interface→renderGameState→JSX。漏任一环节=静默失败
-- engine.ts 的 Card 为 interface (非 class)，getter 不参与 JSON 序列化 → 云端场景需注意
 
 ### 游戏机制
 - **自扯弹窗**: 打出3张炸弹无上轮 → 弹窗双确认(炸弹/自扯)
