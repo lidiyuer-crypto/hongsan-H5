@@ -680,7 +680,11 @@ export default function Game() {
 
   const submitPlay = (cards: any[], isSelfChe: boolean, cheRemain: any[] | null) => {
     if (isOnlineRef.current) {
-      networkClient.playCards(cards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })), isSelfChe || false);
+      networkClient.playCards(
+        cards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })),
+        isSelfChe || false,
+        cheRemain ? cheRemain.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })) : undefined
+      );
       return;
     }
     const engine = engineRef.current;

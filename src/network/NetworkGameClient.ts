@@ -215,8 +215,8 @@ export class NetworkGameClient {
     this.send({ type: 'start_game' });
   }
 
-  playCards(cards: { suit: number; rankValue: number }[], isSelfChe = false) {
-    this.send({ type: 'play_cards', cards, isSelfChe });
+  playCards(cards: { suit: number; rankValue: number }[], isSelfChe = false, cheRemainCards?: { suit: number; rankValue: number }[]) {
+    this.send({ type: 'play_cards', cards, isSelfChe, cheRemainCards });
   }
 
   pass() {

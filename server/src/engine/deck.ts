@@ -102,6 +102,56 @@ export function smartShuffleDeal(allCards: Card[], level: number): Card[][] {
   return playerCards;
 }
 
+// Test mode: adjusts red 3 distribution, all other cards follow normal deal
+export function adjustRed3sForTestMode(hands: Card[][], testModeType: string): Card[][] {
+  // Find current positions of both red 3s
+  const red3Positions: { player: number; cardIndex: number }[] = [];
+  for (let pi = 0; pi < 4; pi++) {
+    for (let ci = 0; ci < hands[pi].length; ci++) {
+      if (hands[pi][ci].isRed3) {
+        red3Positions.push({ player: pi, cardIndex: ci });
+      }
+    }
+  }
+  if (red3Positions.length !== 2) return hands; // safety
+
+  // Determine target players for the 2 red 3s
+  let targets: number[];
+  if (testModeType === 'business-self') {
+    targets = [0, 0];
+  } else if (testModeType === 'business-other') {
+    const bot = Math.floor(Math.random() * 3) + 1;
+    targets = [bot, bot];
+  } else {
+    // normal-22: two different players
+    const p1 = Math.floor(Math.random() * 4);
+    let p2: number;
+    do { p2 = Math.floor(Math.random() * 4); } while (p2 === p1);
+    targets = [p1, p2];
+  }
+
+  // Move each red 3 to its target via swap
+  for (let i = 0; i < 2; i++) {
+    const target = targets[i];
+    const current = red3Positions[i];
+    if (current.player === target) continue;
+
+    // Find a non-red-3 card in target's hand to swap with
+    const swapIdx = hands[target].findIndex(c => !c.isRed3);
+    if (swapIdx === -1) continue;
+
+    // Swap
+    const tmp = hands[current.player][current.cardIndex];
+    hands[current.player][current.cardIndex] = hands[target][swapIdx];
+    hands[target][swapIdx] = tmp;
+
+    // Update tracked position (for case where both red3s go to same target)
+    red3Positions[i] = { player: target, cardIndex: swapIdx };
+  }
+
+  return hands;
+}
+
 export function normalDeal(allCards: Card[]): Card[][] {
   shuffleArray(allCards);
   const hands: Card[][] = [[], [], [], []];

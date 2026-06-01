@@ -7,7 +7,7 @@ export interface ClientMessages {
   join_room: { type: "join_room"; roomCode: string };
   ready: { type: "ready" };
   start_game: { type: "start_game" };
-  play_cards: { type: "play_cards"; cards: CardRef[]; isSelfChe?: boolean };
+  play_cards: { type: "play_cards"; cards: CardRef[]; isSelfChe?: boolean; cheRemainCards?: CardRef[] };
   pass: { type: "pass" };
   che_action: { type: "che_action"; cards: CardRef[] };
   decline_che: { type: "decline_che" };

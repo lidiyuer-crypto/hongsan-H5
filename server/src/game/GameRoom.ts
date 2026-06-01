@@ -359,7 +359,7 @@ export class GameRoom {
 
   // ===== Player Actions =====
 
-  playCards(userId: number, cardsData: { suit: number; rankValue: number }[], isSelfChe: boolean) {
+  playCards(userId: number, cardsData: { suit: number; rankValue: number }[], isSelfChe: boolean, cheRemainCards?: { suit: number; rankValue: number }[]) {
     if (!this.game) return { error: '游戏未开始' };
     const g = this.game;
     const player = g.players.find(p => p.userId === userId);
@@ -384,17 +384,20 @@ export class GameRoom {
     if (!playInfo) return { error: '无效牌型' };
 
     // First turn check
-    if (g.isFirstTurnOfGame && g.turnIndex === g.players.find(p => p.hand.some(c => c.isH4))?.id) {
-      const hasH4 = cards.some(c => c.isH4);
-      const isThreeFours = cards.length === 3 && cards.every(c => c.rankValue === 4) && cards.some(c => c.isH4);
-      if (!hasH4 && !isThreeFours) return { error: '首回合必须出红桃4' };
+    if (g.isFirstTurnOfGame && player.id === g.turnIndex) {
+      const hasFour4s = player.hand.filter(c => c.rankValue === 4).length === 4;
+      if (!hasFour4s) {
+        const hasH4 = cards.some(c => c.isH4);
+        const isThreeFours = cards.length === 3 && cards.every(c => c.rankValue === 4) && cards.some(c => c.isH4);
+        if (!hasH4 && !isThreeFours) return { error: '首手仅能出红桃4或3个4包含红桃4的自扯' };
+      }
     }
 
     // Can beat check
     if (!canBeat(g.lastValidPlay, playInfo)) return { error: '打不过场上的牌' };
 
     // Execute play
-    this.executePlay(player.id, cards, playInfo, isSelfChe);
+    this.executePlay(player.id, cards, playInfo, isSelfChe, cheRemainCards);
 
     // Check game over
     if (player.hand.length === 0) {
@@ -528,7 +531,7 @@ export class GameRoom {
 
   // ===== Core Game Logic =====
 
-  private executePlay(playerId: number, cards: Card[], playInfo: PlayInfo, isSelfChe: boolean) {
+  private executePlay(playerId: number, cards: Card[], playInfo: PlayInfo, isSelfChe: boolean, cheRemainCards?: { suit: number; rankValue: number }[]) {
     const g = this.game!;
     const player = g.players[playerId];
 
@@ -537,6 +540,17 @@ export class GameRoom {
       const idx = player.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
       if (idx >= 0) player.hand.splice(idx, 1);
     });
+
+    // Self-che: remove remaining che cards from hand too (matches local engine)
+    if (isSelfChe) {
+      g.roundHasCheHappened = true;
+      if (cheRemainCards) {
+        cheRemainCards.forEach(c => {
+          const idx = player.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
+          if (idx >= 0) player.hand.splice(idx, 1);
+        });
+      }
+    }
 
     // Add to table
     g.tableCards.push(...cards);
@@ -548,6 +562,11 @@ export class GameRoom {
     g.isFirstTurnOfGame = false;
     g.passStatuses = [false, false, false, false];
     g.passCount = 0;
+
+    // Self-che: mark last play as che type (override regular playInfo type)
+    if (isSelfChe) {
+      g.lastValidPlay = { ...playInfo, type: HAND_TYPES.CHE } as PlayInfo;
+    }
 
     g.roundHistory.push({
       playerId,
@@ -662,33 +681,68 @@ export class GameRoom {
 
   private checkTeamVictory() {
     const g = this.game!;
-    const finished = g.players.filter(p => p.finished);
-
-    // Double lock: same team 1st and 2nd (sorted by rank, not seat order)
-    if (finished.length >= 2) {
-      const sorted = finished.filter(p => p.rank !== null).sort((a, b) => (a.rank || 0) - (b.rank || 0));
-      if (sorted.length >= 2 && sorted[0].rank === 1 && sorted[1].rank === 2) {
-        if (sorted[0].isRed3Team === sorted[1].isRed3Team) {
-          g.status = 'finished';
-          g.victoryReason = '双关';
-          g.victoryTeam = sorted[0].isRed3Team ? 'red' : 'black';
-        }
-      }
-    }
+    const finished = g.players.filter(p => p.finished && p.rank !== null);
 
     // Business mode check
     if (g.isBusinessMode) {
       const bp = g.players[g.businessPlayerId];
-      if (bp && bp.finished && bp.rank === 1) {
+      // Business player wins if rank ≤ 3 (matches local engine)
+      if (bp && bp.finished && bp.rank !== null && bp.rank <= 3) {
         g.status = 'finished';
         g.victoryReason = '业务胜利';
         g.victoryTeam = 'business';
-      } else if (bp && !bp.finished) {
-        const allOthersFinished = g.players.every(p => p.id === g.businessPlayerId || p.finished);
-        if (allOthersFinished) {
-          g.status = 'finished';
-          g.victoryReason = '非业务玩家胜利';
-          g.victoryTeam = bp.isRed3Team ? 'black' : 'red';
+        return;
+      }
+      // Non-business players win if they take ranks 1,2,3
+      if (bp && (!bp.finished || bp.rank === 4)) {
+        const nonBP = finished.filter(p => p.id !== g.businessPlayerId);
+        if (nonBP.length === 3) {
+          const ranks = nonBP.map(p => p.rank);
+          if (ranks.includes(1) && ranks.includes(2) && ranks.includes(3)) {
+            g.status = 'finished';
+            g.victoryReason = '非业务玩家胜利';
+            g.victoryTeam = bp.isRed3Team ? 'black' : 'red';
+            return;
+          }
+        }
+      }
+    }
+
+    if (finished.length < 2) return;
+
+    // Build rank → player map
+    const ranks: Record<number, any> = {};
+    finished.forEach(p => { ranks[p.rank!] = p; });
+
+    // Double lock: same team takes rank 1 and 2
+    if (!g.isBusinessMode && ranks[1] && ranks[2]) {
+      const p1 = ranks[1], p2 = ranks[2];
+      if (p1.isRed3Team === p2.isRed3Team) {
+        g.status = 'finished';
+        g.victoryReason = '双关';
+        g.victoryTeam = p1.isRed3Team ? 'red' : 'black';
+        return;
+      }
+    }
+
+    // Tribute logic: 1-3 same team → +5, 2-4 same team → +5
+    if (!g.tributeProcessed) {
+      if (ranks[1] && ranks[3]) {
+        const p1 = ranks[1], p3 = ranks[3];
+        if (p1.isRed3Team === p3.isRed3Team) {
+          const winningTeam = p1.isRed3Team ? 'red' : 'black';
+          if (!g.teamPotBonus) g.teamPotBonus = { red_team: 0, black_team: 0 };
+          g.teamPotBonus[winningTeam === 'red' ? 'red_team' : 'black_team'] += 5;
+          g.tributeProcessed = true;
+        }
+      }
+      if (ranks[2] && ranks[4]) {
+        const p2 = ranks[2], p4 = ranks[4];
+        if (p2.isRed3Team === p4.isRed3Team) {
+          const winningTeam = p2.isRed3Team ? 'black' : 'red'; // 2-4: opposite of 1-3
+          if (!g.teamPotBonus) g.teamPotBonus = { red_team: 0, black_team: 0 };
+          g.teamPotBonus[winningTeam === 'red' ? 'red_team' : 'black_team'] += 5;
+          g.tributeProcessed = true;
         }
       }
     }
@@ -699,11 +753,18 @@ export class GameRoom {
     const activePlayers = g.players.filter(p => !p.finished);
     if (activePlayers.length === 1) {
       const lastPlayer = activePlayers[0];
-      // Last player loses - winner is lastPlayByPlayerId or the last to finish
       lastPlayer.rank = 4;
       lastPlayer.finished = true;
 
-      // Determine winner by pot comparison
+      // Give winner the last player's hand + table/history cards as bonus (matches local engine)
+      const winnerId = g.lastPlayByPlayerId >= 0 ? g.lastPlayByPlayerId : g.players.find(p => p.rank === 1)?.id;
+      if (winnerId !== undefined) {
+        const winner = g.players[winnerId];
+        if (winner) {
+          winner.pot += lastPlayer.hand.length + g.tableCards.length + g.historyCards.length;
+        }
+      }
+
       this.determineWinnerByPot();
     }
   }
@@ -711,15 +772,23 @@ export class GameRoom {
   private determineWinnerByPot() {
     const g = this.game!;
     if (g.currentRound < g.config.totalRounds) {
-      // Within multi-round: team with more total pot wins
       const redPot = g.players.filter(p => p.isRed3Team).reduce((s, p) => s + p.pot, 0);
       const blackPot = g.players.filter(p => !p.isRed3Team).reduce((s, p) => s + p.pot, 0);
 
+      // Add team pot bonus (tribute) to the comparison
+      const tb = g.teamPotBonus || { red_team: 0, black_team: 0 };
+      const redFinal = redPot + (tb.red_team || 0);
+      const blackFinal = blackPot + (tb.black_team || 0);
+
       g.status = 'finished';
       g.victoryReason = '章子比拼';
-      if (redPot > blackPot) g.victoryTeam = 'red';
-      else if (blackPot > redPot) g.victoryTeam = 'black';
-      else g.victoryTeam = g.players[0].isRed3Team ? 'black' : 'red'; // Opposite of rank 1
+      if (redFinal > blackFinal) g.victoryTeam = 'red';
+      else if (blackFinal > redFinal) g.victoryTeam = 'black';
+      else {
+        // Tiebreaker: use rank 1 player's team (matches local engine)
+        const rank1 = g.players.find(p => p.rank === 1);
+        g.victoryTeam = rank1?.isRed3Team ? 'red' : 'black';
+      }
     }
   }
 
@@ -823,7 +892,7 @@ export class GameRoom {
     g.roundHasCheHappened = false;
     g.roundHistory = [];
     g.rankCounter = 0;
-    g.red3CountByPlayer = {};
+    g.red3CountByPlayer = { 0: 0, 1: 0, 2: 0, 3: 0 };
     g.tributeProcessed = false;
     g.teamPotBonus = null;
     g.pendingCollect = false;

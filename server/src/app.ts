@@ -256,7 +256,7 @@ onMessage('play_cards', (userId, data) => {
   const room = roomManager.getRoom(client.roomCode);
   if (!room || !room.game) return;
 
-  const result = room.playCards(userId, data.cards || [], data.isSelfChe || false);
+  const result = room.playCards(userId, data.cards || [], data.isSelfChe || false, data.cheRemainCards);
   if ('error' in result) {
     sendToUser(userId, { type: 'action_result', success: false, error: result.error });
   }
