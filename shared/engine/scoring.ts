@@ -1,6 +1,5 @@
 import { HAND_TYPES } from './constants';
 import type { Card } from './card';
-import type { PlayInfo } from './analyzer';
 
 export interface BombDetail {
   playerId: number;

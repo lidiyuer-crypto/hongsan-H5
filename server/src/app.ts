@@ -220,16 +220,24 @@ onMessage('ready', (userId) => {
 
 onMessage('add_bot', (userId) => {
   const client = clients.get(userId);
-  if (!client || !client.roomCode) return;
+  if (!client || !client.roomCode) {
+    console.log('[add_bot] No client or roomCode for userId:', userId);
+    return;
+  }
 
   const room = roomManager.getRoom(client.roomCode);
-  if (!room) return;
+  if (!room) {
+    console.log('[add_bot] Room not found:', client.roomCode);
+    return;
+  }
   if (room.ownerId !== userId) {
+    console.log('[add_bot] Owner mismatch:', userId, 'vs', room.ownerId);
     sendToUser(userId, { type: 'error', message: '只有房主可以添加电脑' });
     return;
   }
 
   const result = room.addBot();
+  console.log('[add_bot] Result:', JSON.stringify(result), 'room:', client.roomCode);
   if ('error' in result) {
     sendToUser(userId, { type: 'error', message: result.error });
   }
@@ -247,6 +255,32 @@ onMessage('start_game', (userId) => {
   }
 
   room.startGame();
+});
+
+onMessage('update_config', (userId, data) => {
+  const client = clients.get(userId);
+  if (!client || !client.roomCode) return;
+
+  const room = roomManager.getRoom(client.roomCode);
+  if (!room) return;
+  if (room.ownerId !== userId) {
+    sendToUser(userId, { type: 'error', message: '仅房主可修改设置' });
+    return;
+  }
+  if (room.game) {
+    sendToUser(userId, { type: 'error', message: '游戏已开始，无法修改设置' });
+    return;
+  }
+
+  room.updateConfig({
+    baseAmount: data.baseAmount ?? room.config.baseAmount,
+    doubleType: data.doubleType ?? room.config.doubleType,
+    smartShuffle: data.smartShuffle ?? room.config.smartShuffle,
+    smartShuffleLevel: data.smartShuffleLevel ?? room.config.smartShuffleLevel,
+    totalRounds: data.totalRounds ?? room.config.totalRounds,
+    showHandCount: data.showHandCount ?? room.config.showHandCount,
+  });
+  room.broadcastRoomState();
 });
 
 onMessage('play_cards', (userId, data) => {
@@ -300,12 +334,19 @@ onMessage('decline_che', (userId) => {
 
 onMessage('next_round', (userId) => {
   const client = clients.get(userId);
-  if (!client || !client.roomCode) return;
+  if (!client || !client.roomCode) {
+    console.log('[next_round] No client or roomCode:', userId);
+    return;
+  }
 
   const room = roomManager.getRoom(client.roomCode);
-  if (!room) return;
+  if (!room) {
+    console.log('[next_round] Room not found:', client.roomCode);
+    return;
+  }
 
   const result = room.nextRound();
+  console.log('[next_round] Result:', JSON.stringify(result));
   if ('error' in result) {
     sendToUser(userId, { type: 'action_result', success: false, error: result.error });
   }

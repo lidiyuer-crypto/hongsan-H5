@@ -18,7 +18,7 @@ function shuffleArray<T>(arr: T[]): T[] {
   return arr;
 }
 
-// 坨坨牌概率配置
+// 坨坨牌 probability config (5 levels)
 const SPLIT_PROBS: Record<number, Record<string, number>> = {
   1: { quad: 0.05, tripleSingle: 0.15, twoPairs: 0.25, pairTwo: 0.35, fourSingles: 0.20 },
   2: { quad: 0.10, tripleSingle: 0.25, twoPairs: 0.30, pairTwo: 0.25, fourSingles: 0.10 },

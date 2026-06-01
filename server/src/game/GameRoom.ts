@@ -1,113 +1,203 @@
-import { Card } from '../engine/card';
-import { createFullDeck, smartShuffleDeal, normalDeal, assignTeams } from '../engine/deck';
-import { analyze, canBeat, generateAllValidPlays } from '../engine/analyzer';
-import { HAND_TYPES, POWER_LEVEL } from '../engine/constants';
-import { calculateFans, calculateSettlement } from '../engine/scoring';
-import type { PlayInfo } from '../engine/analyzer';
+import { Card } from '../../../shared/engine/card';
+import { createFullDeck, smartShuffleDeal, normalDeal, assignTeams } from '../../../shared/engine/deck';
+import { analyze, canBeat, generateAllValidPlays } from '../../../shared/engine/analyzer';
+import { HAND_TYPES, POWER_LEVEL } from '../../../shared/engine/constants';
+import { calculateFans, calculateSettlement } from '../../../shared/engine/scoring';
+import type { PlayInfo } from '../../../shared/engine/analyzer';
+import {
+  createInitialGameState,
+  executePlay as executePlayAction,
+  activateChePhase as activateChePhaseState,
+  endChePhase as endChePhaseState,
+  collectPot as collectPotState,
+  updateRevealed,
+  checkTeamVictory,
+  checkGameOver as checkGameOverState,
+  determineWinnerByPot,
+  findNextPlayer,
+  resetForNextRound,
+} from '../../../shared/engine/GameState';
+import type { RoomConfig, GamePlayer, GameStateData } from '../../../shared/engine/GameState';
 import { broadcastToRoom, sendToUser } from '../ws/handler';
 
-// ===== Types =====
+// Re-export types for app.ts
+export type { RoomConfig };
 
-export interface RoomConfig {
-  baseAmount: number;
-  doubleType: 'flat' | 'steep';
-  smartShuffle: boolean;
-  smartShuffleLevel: number;
-  totalRounds: number;
-  showHandCount: boolean;
-}
-
-interface GamePlayer {
-  id: number;           // seat 0-3
-  userId: number;        // database user id
-  name: string;
-  hand: Card[];
-  pot: number;           // cards won from pots
-  finished: boolean;
-  isRed3Team: boolean;
-  revealed: boolean;
-  rank: number | null;
-  canChe: boolean;
-  isBot: boolean;
-  disconnected: boolean;
-}
-
-interface GameState {
-  gameId: number;
-  players: GamePlayer[];
-  config: RoomConfig;
-  currentRound: number;
-  status: 'playing' | 'finished';
-
-  // Turn state
-  turnIndex: number;
-  lastValidPlay: PlayInfo | null;
-  lastPlayByPlayerId: number;
-  passCount: number;
-  passStatuses: boolean[];
-
-  // Table
-  tableCards: Card[];
-  historyCards: Card[];
-
-  // First turn
-  isFirstTurnOfGame: boolean;
-
-  // Che phase
-  chePhase: boolean;
-  chePhaseStartedAt: number | null;
-  cheTimerExpired: boolean;
-  askingSourceId: number;
-  roundHasCheHappened: boolean;
-
-  // Business mode
-  isBusinessMode: boolean;
-  businessPlayerId: number;
-
-  // Trackers
-  roundHistory: { playerId: number; type: number; rank: number; cards: Card[] }[];
-  rankCounter: number;
-  red3CountByPlayer: Record<number, number>;
-
-  // Victory
-  victoryReason: string | null;
-  victoryTeam: string | null;
-
-  // Pots
-  pendingCollect: boolean;
-  pendingPassPlayerId: number;
-  teamPotBonus: Record<string, number> | null;
-  tributeProcessed: boolean;
-
-  // Accumulated
-  accumulatedScores: Record<number, number>;
-  _scoresStored: boolean;
-}
-
-// ===== GameRoom =====
+// ===== Constants =====
 
 const TURN_TIMEOUT = 30000;  // 30s
 const CHE_TIMEOUT = 3000;    // 3s
 const DISCONNECT_GRACE = 60000; // 60s before AI substitution
+
+// ===== Bot Controller =====
+
+class BotController {
+  private room: GameRoom;
+  private botTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+
+  constructor(room: GameRoom) {
+    this.room = room;
+  }
+
+  scheduleMove(playerId: number): void {
+    const g = this.room.game;
+    if (!g) return;
+    const player = g.players[playerId];
+    if (!player || !player.isBot) return;
+
+    // Clear any existing timer for this bot
+    const existing = this.botTimers.get(playerId);
+    if (existing) { clearTimeout(existing); this.botTimers.delete(playerId); }
+
+    const timer = setTimeout(() => {
+      this.executeMove(playerId);
+    }, 1000 + Math.random() * 1500); // 1-2.5s realistic delay
+    this.botTimers.set(playerId, timer);
+  }
+
+  clearTimer(playerId: number): void {
+    const bt = this.botTimers.get(playerId);
+    if (bt) { clearTimeout(bt); this.botTimers.delete(playerId); }
+  }
+
+  clearAll(): void {
+    this.botTimers.forEach(t => clearTimeout(t));
+    this.botTimers.clear();
+  }
+
+  private executeMove(playerId: number): void {
+    const g = this.room.game;
+    if (!g) return;
+    const player = g.players[playerId];
+    if (!player || g.turnIndex !== playerId) return;
+
+    // Che phase bot: 60% chance to che, but only if bot can che
+    if (g.chePhase && player.canChe && !g.cheTimerExpired) {
+      if (Math.random() > 0.4) {
+        const rank = g.lastValidPlay?.rank;
+        if (rank) {
+          const cards = player.hand
+            .filter(c => c.rankValue === rank)
+            .slice(0, 2);
+          if (cards.length === 2) {
+            this.executeCheBot(playerId, cards);
+            return;
+          }
+        }
+      }
+      this.room.declineChe(player.userId);
+      return;
+    }
+
+    // If che phase is active but bot can't che, wait (don't play through che)
+    if (g.chePhase) return;
+
+    // Normal bot play
+    const validPlays = generateAllValidPlays(player.hand, g.lastValidPlay, g.isFirstTurnOfGame);
+    if (validPlays.length > 0) {
+      // Pick the weakest valid play
+      const play = validPlays[0]!;
+      this.executeBotPlay(playerId, play);
+    } else {
+      // Pass
+      g.passStatuses[playerId] = true;
+      g.passCount++;
+      const activePlayers = g.players.filter(p => !p.finished);
+      const passedCount = activePlayers.filter(p => g.passStatuses[p.id]).length;
+      if (passedCount >= activePlayers.length - 1 && activePlayers.length > 1) {
+        g.pendingCollect = true;
+        g.pendingPassPlayerId = playerId;
+        this.room.scheduleCollect();
+      } else {
+        this.room.advanceTurn();
+      }
+      this.room.broadcastGameState();
+    }
+  }
+
+  private executeBotPlay(playerId: number, play: PlayInfo): void {
+    const g = this.room.game;
+    if (!g) return;
+
+    executePlayAction(g, playerId, play.cards, play, false);
+
+    const player = g.players[playerId]!;
+
+    if (player.hand.length === 0) {
+      player.finished = true;
+      player.rank = ++g.rankCounter;
+      if (checkTeamVictory(g)) {
+        this.room.endGame();
+        return;
+      }
+    }
+
+    if (g.players.filter(p => !p.finished).length === 1) {
+      checkGameOverState(g);
+      if (g.status === 'finished') {
+        this.room.endGame();
+        return;
+      }
+    }
+
+    if (play.type === HAND_TYPES.SINGLE && !g.chePhase && !g.roundHasCheHappened) {
+      const anyHuman = activateChePhaseState(g, playerId, play.cards[0]!.rankValue);
+      const timeout = anyHuman ? CHE_TIMEOUT : 800;
+      this.room.startCheTimer(timeout);
+    } else {
+      this.room.advanceTurn();
+    }
+
+    this.room.broadcastGameState();
+  }
+
+  private executeCheBot(playerId: number, cards: Card[]): void {
+    const g = this.room.game;
+    if (!g) return;
+
+    this.room.clearCheTimers();
+    endChePhaseState(g);
+
+    // Remove cards from hand
+    cards.forEach(c => {
+      const idx = g.players[playerId]!.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
+      if (idx >= 0) g.players[playerId]!.hand.splice(idx, 1);
+    });
+
+    // Set last valid play as che
+    g.lastValidPlay = { type: HAND_TYPES.CHE, rank: cards[0]!.rankValue, level: POWER_LEVEL.NORMAL, cards };
+    g.lastPlayByPlayerId = playerId;
+    g.passStatuses = [false, false, false, false];
+    g.passCount = 0;
+    g.roundHistory.push({ playerId, type: HAND_TYPES.CHE, rank: cards[0]!.rankValue, cards });
+
+    g.turnIndex = findNextPlayer(g, playerId);
+    this.room.startTurnTimer();
+    this.room.broadcastGameState();
+  }
+}
+
+// ===== GameRoom =====
 
 export class GameRoom {
   roomCode: string;
   ownerId: number;
   players: { userId: number; seat: number; name: string; ready: boolean; isBot: boolean }[] = [];
   config: RoomConfig;
-  game: GameState | null = null;
+  game: GameStateData | null = null;
   private botCounter = 0;
 
   private turnTimer: ReturnType<typeof setTimeout> | null = null;
   private cheTimer: ReturnType<typeof setTimeout> | null = null;
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   private disconnectTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
-  private botTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+  private bots: BotController;
 
   constructor(roomCode: string, config: RoomConfig, ownerId: number) {
     this.roomCode = roomCode;
     this.config = config;
     this.ownerId = ownerId;
+    this.bots = new BotController(this);
   }
 
   // ===== Room Management =====
@@ -126,7 +216,6 @@ export class GameRoom {
     if (this.players.length >= 4) return { error: '房间已满' };
     if (this.game) return { error: '游戏已开始' };
 
-    // Find available seat
     const takenSeats = new Set(this.players.map(p => p.seat));
     let seat = -1;
     for (let s = 0; s < 4; s++) {
@@ -135,7 +224,7 @@ export class GameRoom {
 
     const botNames = ['电脑A', '电脑B', '电脑C', '电脑D'];
     this.botCounter++;
-    const botUserId = -(seat + 1) * 1000 - this.botCounter; // negative to distinguish from real users
+    const botUserId = -(seat + 1) * 1000 - this.botCounter;
     const botName = botNames[seat] || `电脑${seat + 1}`;
 
     this.players.push({ userId: botUserId, seat, name: botName, ready: true, isBot: true });
@@ -158,14 +247,16 @@ export class GameRoom {
     player.ready = !player.ready;
     this.broadcastRoomState();
 
-    // Auto-start if all 4 ready
     if (this.players.length === 4 && this.players.every(p => p.ready)) {
       this.startGame();
     }
   }
 
+  updateConfig(partial: Partial<RoomConfig>): void {
+    Object.assign(this.config, partial);
+  }
+
   canStart(): boolean {
-    // At least 1 human player, all seats filled, all humans ready
     const humanPlayers = this.players.filter(p => !p.isBot);
     return this.players.length === 4 && humanPlayers.every(p => p.ready) && humanPlayers.length >= 1;
   }
@@ -187,12 +278,11 @@ export class GameRoom {
       ? smartShuffleDeal(deck, this.config.smartShuffleLevel)
       : normalDeal(deck);
 
-    // Assign seats to hands
     const gamePlayers: GamePlayer[] = this.players.map((rp) => ({
       id: rp.seat,
       userId: rp.userId,
       name: rp.name,
-      hand: hands[rp.seat],
+      hand: hands[rp.seat]!,
       pot: 0,
       finished: false,
       isRed3Team: false,
@@ -203,62 +293,38 @@ export class GameRoom {
       disconnected: false,
     }));
 
-    // Assign teams — pass gamePlayers directly (assignTeams mutates the objects in-place)
     const { isBusinessMode, businessPlayerId, firstPlayer } = assignTeams(gamePlayers);
 
-    const gameId = Date.now();
-
-    this.game = {
-      gameId,
-      players: gamePlayers,
-      config: this.config,
-      currentRound: 1,
-      status: 'playing',
-
-      turnIndex: firstPlayer,
-      lastValidPlay: null,
-      lastPlayByPlayerId: -1,
-      passCount: 0,
-      passStatuses: [false, false, false, false],
-
-      tableCards: [],
-      historyCards: [],
-
-      isFirstTurnOfGame: true,
-
-      chePhase: false,
-      chePhaseStartedAt: null,
-      cheTimerExpired: false,
-      askingSourceId: -1,
-      roundHasCheHappened: false,
-
-      isBusinessMode,
-      businessPlayerId,
-
-      roundHistory: [],
-      rankCounter: 0,
-      red3CountByPlayer: {},
-
-      victoryReason: null,
-      victoryTeam: null,
-
-      pendingCollect: false,
-      pendingPassPlayerId: -1,
-      teamPotBonus: null,
-      tributeProcessed: false,
-
-      accumulatedScores: { 0: 0, 1: 0, 2: 0, 3: 0 },
-      _scoresStored: false,
-    };
+    this.game = createInitialGameState(gamePlayers, this.config, isBusinessMode, businessPlayerId, firstPlayer);
 
     // Broadcast game start to each player (with filtered state)
     this.players.forEach(rp => {
       const state = this.getStateForPlayer(rp.seat);
-      sendToUser(rp.userId, { type: 'game_start', gameId, state });
+      sendToUser(rp.userId, { type: 'game_start', gameId: this.game!.gameId, state });
     });
 
-    // Start turn timer
     this.startTurnTimer();
+  }
+
+  nextRound() {
+    if (!this.game) return { error: '游戏未开始' };
+    const g = this.game;
+
+    if (g.currentRound >= g.config.totalRounds) return { error: '已是最后一局' };
+    if (g.status !== 'finished') return { error: '当前局还未结束' };
+
+    const deck = createFullDeck();
+    const hands = this.config.smartShuffle
+      ? smartShuffleDeal(deck, this.config.smartShuffleLevel)
+      : normalDeal(deck);
+
+    const { isBusinessMode, businessPlayerId, firstPlayer } = assignTeams(g.players);
+
+    resetForNextRound(g, hands, isBusinessMode, businessPlayerId, firstPlayer);
+
+    this.broadcastGameState();
+    this.startTurnTimer();
+    return { success: true };
   }
 
   // ===== State Filtering =====
@@ -267,7 +333,6 @@ export class GameRoom {
     if (!this.game) return null;
     const g = this.game;
 
-    // Build player views - only show full hand for own seat
     const playerViews = g.players.map(p => {
       const isMe = p.id === seat;
       return {
@@ -323,7 +388,6 @@ export class GameRoom {
       isBusinessMode: g.isBusinessMode,
       businessPlayerId: g.businessPlayerId,
 
-      // Count fans from round history (for display)
       currentFans: g.roundHistory.reduce((sum, r) => {
         if (r.type === HAND_TYPES.BOMB) return sum + 1;
         if (r.type === HAND_TYPES.H_BOMB) return sum + 2;
@@ -379,7 +443,6 @@ export class GameRoom {
     }
     if (remainingData.length > 0) return { error: '手牌中没有这些牌' };
 
-    // Analyze
     const playInfo = analyze(cards);
     if (!playInfo) return { error: '无效牌型' };
 
@@ -393,37 +456,35 @@ export class GameRoom {
       }
     }
 
-    // Can beat check
     if (!canBeat(g.lastValidPlay, playInfo)) return { error: '打不过场上的牌' };
 
-    // Execute play
-    this.executePlay(player.id, cards, playInfo, isSelfChe, cheRemainCards);
+    // Execute play via shared pure function
+    executePlayAction(g, player.id, cards, playInfo, isSelfChe, cheRemainCards);
 
     // Check game over
     if (player.hand.length === 0) {
       player.finished = true;
       player.rank = ++g.rankCounter;
 
-      // Check team victory
-      this.checkTeamVictory();
-      if (g.status === 'finished') {
+      if (checkTeamVictory(g)) {
         this.endGame();
         return { success: true, gameFinished: true };
       }
     }
 
-    // Check if only 1 active player left
     if (g.players.filter(p => !p.finished).length === 1) {
-      this.checkGameOver();
+      checkGameOverState(g);
       if (g.status === 'finished') {
         this.endGame();
         return { success: true, gameFinished: true };
       }
     }
 
-    // Check che phase activation
+    // Che phase activation
     if (playInfo.type === HAND_TYPES.SINGLE && !g.chePhase && !g.roundHasCheHappened) {
-      this.activateChePhase(player.id, cards[0].rankValue);
+      const anyHuman = activateChePhaseState(g, player.id, cards[0]!.rankValue);
+      const timeout = anyHuman ? CHE_TIMEOUT : 800;
+      this.startCheTimer(timeout);
     } else {
       this.advanceTurn();
     }
@@ -443,15 +504,13 @@ export class GameRoom {
     g.passStatuses[player.id] = true;
     g.passCount++;
 
-    // Check if all other active players passed
     const activePlayers = g.players.filter(p => !p.finished);
     const passedCount = activePlayers.filter(p => g.passStatuses[p.id]).length;
 
     if (passedCount >= activePlayers.length - 1 && activePlayers.length > 1) {
-      // Collect pot
       g.pendingCollect = true;
       g.pendingPassPlayerId = player.id;
-      this.collectTimer = setTimeout(() => this.collectPot(), 1000);
+      this.scheduleCollect();
       broadcastToRoom(this.roomCode, { type: 'action_result', success: true, pendingCollect: true });
     } else {
       this.advanceTurn();
@@ -468,7 +527,6 @@ export class GameRoom {
     if (!player || !player.canChe) return { error: '不能扯牌' };
     if (!g.chePhase) return { error: '不在扯牌阶段' };
 
-    // Find cards
     const cards: Card[] = [];
     const remainingData = [...cardsData.map(c => ({ ...c }))];
     for (const c of player.hand) {
@@ -480,31 +538,29 @@ export class GameRoom {
     }
 
     if (cards.length !== 2) return { error: '扯牌需要2张同点数牌' };
-    if (cards[0].rankValue !== cards[1].rankValue) return { error: '扯牌需要2张同点数的牌' };
+    if (cards[0]!.rankValue !== cards[1]!.rankValue) return { error: '扯牌需要2张同点数的牌' };
 
     // Execute che
     this.clearCheTimers();
-    g.chePhase = false;
-    g.roundHasCheHappened = true;
+    endChePhaseState(g);
 
-    // Remove cards from hand
     cards.forEach(c => {
       const idx = player.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
       if (idx >= 0) player.hand.splice(idx, 1);
     });
 
-    // Set as last valid play (che type)
-    g.lastValidPlay = { type: HAND_TYPES.CHE, rank: cards[0].rankValue, level: POWER_LEVEL.NORMAL, cards };
+    if (g.tableCards.length > 0) {
+      g.historyCards.push(...g.tableCards);
+    }
+    g.tableCards = [...cards];
+
+    g.lastValidPlay = { type: HAND_TYPES.CHE, rank: cards[0]!.rankValue, level: POWER_LEVEL.NORMAL, cards };
     g.lastPlayByPlayerId = player.id;
     g.passStatuses = [false, false, false, false];
     g.passCount = 0;
-    g.roundHistory.push({ playerId: player.id, type: HAND_TYPES.CHE, rank: cards[0].rankValue, cards });
+    g.roundHistory.push({ playerId: player.id, type: HAND_TYPES.CHE, rank: cards[0]!.rankValue, cards });
 
-    // Reset che flags
-    g.players.forEach(p => { p.canChe = false; });
-
-    // Turn moves to the player AFTER the che player (clockwise)
-    g.turnIndex = this.findNextPlayer(player.id);
+    g.turnIndex = findNextPlayer(g, player.id);
     this.startTurnTimer();
 
     this.broadcastGameState();
@@ -519,284 +575,31 @@ export class GameRoom {
 
     player.canChe = false;
 
-    // Check if anyone can still che
     const anyCanChe = g.players.some(p => p.canChe);
     if (!anyCanChe) {
-      this.endChePhase();
+      endChePhaseState(g);
+      this.clearCheTimers();
+      this.advanceTurn();
     }
 
     this.broadcastGameState();
     return { success: true };
   }
 
-  // ===== Core Game Logic =====
+  // ===== Turn Management =====
 
-  private executePlay(playerId: number, cards: Card[], playInfo: PlayInfo, isSelfChe: boolean, cheRemainCards?: { suit: number; rankValue: number }[]) {
-    const g = this.game!;
-    const player = g.players[playerId];
-
-    // Remove cards from hand
-    cards.forEach(c => {
-      const idx = player.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
-      if (idx >= 0) player.hand.splice(idx, 1);
-    });
-
-    // Self-che: remove remaining che cards from hand too (matches local engine)
-    if (isSelfChe) {
-      g.roundHasCheHappened = true;
-      if (cheRemainCards) {
-        cheRemainCards.forEach(c => {
-          const idx = player.hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
-          if (idx >= 0) player.hand.splice(idx, 1);
-        });
-      }
-    }
-
-    // Add to table
-    g.tableCards.push(...cards);
-    g.historyCards.push(...cards);
-
-    // Update game state
-    g.lastValidPlay = playInfo;
-    g.lastPlayByPlayerId = playerId;
-    g.isFirstTurnOfGame = false;
-    g.passStatuses = [false, false, false, false];
-    g.passCount = 0;
-
-    // Self-che: mark last play as che type (override regular playInfo type)
-    if (isSelfChe) {
-      g.lastValidPlay = { ...playInfo, type: HAND_TYPES.CHE } as PlayInfo;
-    }
-
-    g.roundHistory.push({
-      playerId,
-      type: playInfo.type,
-      rank: playInfo.rank,
-      cards,
-    });
-
-    // Check red3 count for reveal
-    const red3Count = cards.filter(c => c.isRed3).length;
-    if (red3Count > 0) {
-      g.red3CountByPlayer[playerId] = (g.red3CountByPlayer[playerId] || 0) + red3Count;
-      this.updateRevealed();
-    }
-  }
-
-  private activateChePhase(sourcePlayerId: number, rankValue: number) {
-    const g = this.game!;
-    g.chePhase = true;
-    g.chePhaseStartedAt = Date.now();
-    g.cheTimerExpired = false;
-    g.askingSourceId = sourcePlayerId;
-
-    // Find players who can che (have 2 of the same rank)
-    let anyHumanCanChe = false;
-    g.players.forEach(p => {
-      if (p.id !== sourcePlayerId && !p.finished) {
-        const count = p.hand.filter(c => c.rankValue === rankValue).length;
-        p.canChe = count >= 2;
-        if (p.canChe && !p.isBot) anyHumanCanChe = true;
-      }
-    });
-
-    // If no human can che, use shorter timeout (bots don't need 3s to decide)
-    // If a human can che, give them the full 3s
-    const timeout = anyHumanCanChe ? CHE_TIMEOUT : 800;
-    this.cheTimer = setTimeout(() => this.endChePhase(), timeout);
-  }
-
-  private endChePhase() {
-    const g = this.game!;
-    g.chePhase = false;
-    g.cheTimerExpired = true;
-    g.roundHasCheHappened = true; // Prevent re-triggering che until next pot collection
-    g.players.forEach(p => { p.canChe = false; });
-    this.clearCheTimers();
-    this.advanceTurn();
-    this.broadcastGameState();
-  }
-
-  private advanceTurn() {
-    const g = this.game!;
-    g.turnIndex = this.findNextPlayer(g.turnIndex);
+  advanceTurn() {
+    if (!this.game) return;
+    this.game.turnIndex = findNextPlayer(this.game, this.game.turnIndex);
     this.startTurnTimer();
   }
 
-  private findNextPlayer(fromId: number): number {
-    const g = this.game!;
-    let next = (fromId - 1 + 4) % 4; // clockwise
-    for (let i = 0; i < 4; i++) {
-      if (!g.players[next].finished) return next;
-      next = (next - 1 + 4) % 4;
-    }
-    return next;
-  }
+  // ===== Settlement =====
 
-  private collectPot() {
-    const g = this.game!;
-    const winner = g.players[g.lastPlayByPlayerId];
-    winner.pot += g.tableCards.length + g.historyCards.length;
-    g.tableCards = [];
-    g.historyCards = [];
-    g.lastValidPlay = null;
-    g.pendingCollect = false;
-    g.passStatuses = [false, false, false, false];
-    g.passCount = 0;
-    g.roundHasCheHappened = false; // Allow che again for the new pot cycle
-
-    // Winner's turn
-    g.turnIndex = g.lastPlayByPlayerId;
-    this.startTurnTimer();
-    this.broadcastGameState();
-  }
-
-  private updateRevealed() {
-    const g = this.game!;
-
-    // Business mode: 5-condition reveal logic (mirrors original engine)
-    if (g.isBusinessMode) {
-      const bpRed3 = g.red3CountByPlayer[g.businessPlayerId] || 0;
-      if (bpRed3 === 1) {
-        g.players.forEach(p => { p.revealed = p.id === g.businessPlayerId; });
-      } else if (bpRed3 >= 2) {
-        g.players.forEach(p => { p.revealed = true; });
-      } else {
-        g.players.forEach(p => { p.revealed = false; });
-      }
-      return;
-    }
-
-    // Normal mode: reveal Red 3 team players who have played Red 3s
-    const revealedTeamPlayers = g.players.filter(
-      p => p.isRed3Team && (g.red3CountByPlayer[p.id] || 0) > 0
-    );
-    revealedTeamPlayers.forEach(p => { p.revealed = true; });
-
-    // If 2 or more Red 3 team players revealed → all identities revealed
-    if (revealedTeamPlayers.length >= 2) {
-      g.players.forEach(p => { p.revealed = true; });
-    }
-  }
-
-  private checkTeamVictory() {
-    const g = this.game!;
-    const finished = g.players.filter(p => p.finished && p.rank !== null);
-
-    // Business mode check
-    if (g.isBusinessMode) {
-      const bp = g.players[g.businessPlayerId];
-      // Business player wins if rank ≤ 3 (matches local engine)
-      if (bp && bp.finished && bp.rank !== null && bp.rank <= 3) {
-        g.status = 'finished';
-        g.victoryReason = '业务胜利';
-        g.victoryTeam = 'business';
-        return;
-      }
-      // Non-business players win if they take ranks 1,2,3
-      if (bp && (!bp.finished || bp.rank === 4)) {
-        const nonBP = finished.filter(p => p.id !== g.businessPlayerId);
-        if (nonBP.length === 3) {
-          const ranks = nonBP.map(p => p.rank);
-          if (ranks.includes(1) && ranks.includes(2) && ranks.includes(3)) {
-            g.status = 'finished';
-            g.victoryReason = '非业务玩家胜利';
-            g.victoryTeam = bp.isRed3Team ? 'black' : 'red';
-            return;
-          }
-        }
-      }
-    }
-
-    if (finished.length < 2) return;
-
-    // Build rank → player map
-    const ranks: Record<number, any> = {};
-    finished.forEach(p => { ranks[p.rank!] = p; });
-
-    // Double lock: same team takes rank 1 and 2
-    if (!g.isBusinessMode && ranks[1] && ranks[2]) {
-      const p1 = ranks[1], p2 = ranks[2];
-      if (p1.isRed3Team === p2.isRed3Team) {
-        g.status = 'finished';
-        g.victoryReason = '双关';
-        g.victoryTeam = p1.isRed3Team ? 'red' : 'black';
-        return;
-      }
-    }
-
-    // Tribute logic: 1-3 same team → +5, 2-4 same team → +5
-    if (!g.tributeProcessed) {
-      if (ranks[1] && ranks[3]) {
-        const p1 = ranks[1], p3 = ranks[3];
-        if (p1.isRed3Team === p3.isRed3Team) {
-          const winningTeam = p1.isRed3Team ? 'red' : 'black';
-          if (!g.teamPotBonus) g.teamPotBonus = { red_team: 0, black_team: 0 };
-          g.teamPotBonus[winningTeam === 'red' ? 'red_team' : 'black_team'] += 5;
-          g.tributeProcessed = true;
-        }
-      }
-      if (ranks[2] && ranks[4]) {
-        const p2 = ranks[2], p4 = ranks[4];
-        if (p2.isRed3Team === p4.isRed3Team) {
-          const winningTeam = p2.isRed3Team ? 'black' : 'red'; // 2-4: opposite of 1-3
-          if (!g.teamPotBonus) g.teamPotBonus = { red_team: 0, black_team: 0 };
-          g.teamPotBonus[winningTeam === 'red' ? 'red_team' : 'black_team'] += 5;
-          g.tributeProcessed = true;
-        }
-      }
-    }
-  }
-
-  private checkGameOver() {
-    const g = this.game!;
-    const activePlayers = g.players.filter(p => !p.finished);
-    if (activePlayers.length === 1) {
-      const lastPlayer = activePlayers[0];
-      lastPlayer.rank = 4;
-      lastPlayer.finished = true;
-
-      // Give winner the last player's hand + table/history cards as bonus (matches local engine)
-      const winnerId = g.lastPlayByPlayerId >= 0 ? g.lastPlayByPlayerId : g.players.find(p => p.rank === 1)?.id;
-      if (winnerId !== undefined) {
-        const winner = g.players[winnerId];
-        if (winner) {
-          winner.pot += lastPlayer.hand.length + g.tableCards.length + g.historyCards.length;
-        }
-      }
-
-      this.determineWinnerByPot();
-    }
-  }
-
-  private determineWinnerByPot() {
-    const g = this.game!;
-    if (g.currentRound < g.config.totalRounds) {
-      const redPot = g.players.filter(p => p.isRed3Team).reduce((s, p) => s + p.pot, 0);
-      const blackPot = g.players.filter(p => !p.isRed3Team).reduce((s, p) => s + p.pot, 0);
-
-      // Add team pot bonus (tribute) to the comparison
-      const tb = g.teamPotBonus || { red_team: 0, black_team: 0 };
-      const redFinal = redPot + (tb.red_team || 0);
-      const blackFinal = blackPot + (tb.black_team || 0);
-
-      g.status = 'finished';
-      g.victoryReason = '章子比拼';
-      if (redFinal > blackFinal) g.victoryTeam = 'red';
-      else if (blackFinal > redFinal) g.victoryTeam = 'black';
-      else {
-        // Tiebreaker: use rank 1 player's team (matches local engine)
-        const rank1 = g.players.find(p => p.rank === 1);
-        g.victoryTeam = rank1?.isRed3Team ? 'red' : 'black';
-      }
-    }
-  }
-
-  private endGame() {
+  endGame() {
     if (!this.game) return;
     const g = this.game;
 
-    // Calculate settlement
     const { fans, bombFans, extraFans, extraFansLabel, bombDetails } = calculateFans(
       g.roundHistory,
       g.victoryReason || '',
@@ -817,7 +620,6 @@ export class GameRoom {
       g.businessPlayerId,
     );
 
-    // Accumulate scores
     settlement.results.forEach(r => {
       g.accumulatedScores[r.playerId] = (g.accumulatedScores[r.playerId] || 0) + r.netWon;
     });
@@ -825,7 +627,6 @@ export class GameRoom {
 
     const isLastRound = g.currentRound >= g.config.totalRounds;
 
-    // Broadcast settlement
     this.players.forEach(rp => {
       sendToUser(rp.userId, {
         type: 'settlement',
@@ -845,69 +646,9 @@ export class GameRoom {
     });
   }
 
-  nextRound() {
-    if (!this.game) return { error: '游戏未开始' };
-    const g = this.game;
-
-    if (g.currentRound >= g.config.totalRounds) return { error: '已是最后一局' };
-    if (g.status !== 'finished') return { error: '当前局还未结束' };
-
-    // Reset for next round
-    const deck = createFullDeck();
-    const hands = this.config.smartShuffle
-      ? smartShuffleDeal(deck, this.config.smartShuffleLevel)
-      : normalDeal(deck);
-
-    g.currentRound++;
-    g.status = 'playing';
-    g.victoryReason = null;
-    g.victoryTeam = null;
-
-    // Reset players
-    g.players.forEach((p, i) => {
-      p.hand = hands[p.id];
-      p.pot = 0;
-      p.finished = false;
-      p.revealed = false;
-      p.rank = null;
-      p.canChe = false;
-    });
-
-    const { isBusinessMode, businessPlayerId, firstPlayer } = assignTeams(g.players);
-    g.isBusinessMode = isBusinessMode;
-    g.businessPlayerId = businessPlayerId;
-
-    // Reset turn state
-    g.turnIndex = firstPlayer;
-    g.lastValidPlay = null;
-    g.lastPlayByPlayerId = -1;
-    g.passCount = 0;
-    g.passStatuses = [false, false, false, false];
-    g.tableCards = [];
-    g.historyCards = [];
-    g.isFirstTurnOfGame = true;
-    g.chePhase = false;
-    g.chePhaseStartedAt = null;
-    g.cheTimerExpired = false;
-    g.askingSourceId = -1;
-    g.roundHasCheHappened = false;
-    g.roundHistory = [];
-    g.rankCounter = 0;
-    g.red3CountByPlayer = { 0: 0, 1: 0, 2: 0, 3: 0 };
-    g.tributeProcessed = false;
-    g.teamPotBonus = null;
-    g.pendingCollect = false;
-    g.pendingPassPlayerId = -1;
-    g._scoresStored = false;
-
-    this.broadcastGameState();
-    this.startTurnTimer();
-    return { success: true };
-  }
-
   // ===== Timers =====
 
-  private startTurnTimer() {
+  startTurnTimer() {
     this.clearTimers();
     if (!this.game) return;
 
@@ -915,9 +656,8 @@ export class GameRoom {
     const player = g.players[g.turnIndex];
     if (!player) return;
 
-    // Bot players — schedule AI move immediately
     if (player.isBot || player.disconnected) {
-      this.scheduleBotMove(player.id);
+      this.bots.scheduleMove(player.id);
       return;
     }
 
@@ -925,35 +665,55 @@ export class GameRoom {
       if (!this.game || this.game.status !== 'playing') return;
       const p = this.game.players[this.game.turnIndex];
       if (!p || p.isBot || p.disconnected) return;
-
-      // Auto-pass on timeout
       this.autoPass();
     }, TURN_TIMEOUT);
+  }
+
+  startCheTimer(timeout: number) {
+    this.cheTimer = setTimeout(() => {
+      if (!this.game || !this.game.chePhase) return;
+      endChePhaseState(this.game);
+      this.clearCheTimers();
+      this.advanceTurn();
+      this.broadcastGameState();
+    }, timeout);
+  }
+
+  scheduleCollect() {
+    this.collectTimer = setTimeout(() => {
+      if (!this.game || !this.game.pendingCollect) return;
+      if (this.game.status !== 'playing') return; // Game already ended — skip pot collection
+
+      const winnerId = collectPotState(this.game);
+      // Set turn to winner
+      this.game.turnIndex = winnerId;
+      this.startTurnTimer();
+      this.broadcastGameState();
+    }, 1000);
+  }
+
+  clearTimers() {
+    if (this.turnTimer) { clearTimeout(this.turnTimer); this.turnTimer = null; }
+  }
+
+  clearCheTimers() {
+    if (this.cheTimer) { clearTimeout(this.cheTimer); this.cheTimer = null; }
   }
 
   private autoPass() {
     if (!this.game) return;
     const g = this.game;
-    const player = g.players[g.turnIndex];
+    const player = g.players[g.turnIndex]!;
 
     if (g.chePhase && player.canChe) {
       this.declineChe(player.userId);
       return;
     }
 
-    // Auto-pass
     g.passStatuses[player.id] = true;
     g.passCount++;
     this.advanceTurn();
     this.broadcastGameState();
-  }
-
-  private clearTimers() {
-    if (this.turnTimer) { clearTimeout(this.turnTimer); this.turnTimer = null; }
-  }
-
-  private clearCheTimers() {
-    if (this.cheTimer) { clearTimeout(this.cheTimer); this.cheTimer = null; }
   }
 
   // ===== Disconnection =====
@@ -962,7 +722,6 @@ export class GameRoom {
     const player = this.players.find(p => p.userId === userId);
     if (!player) return;
 
-    // Start grace period
     const timer = setTimeout(() => {
       this.activateBotForPlayer(userId);
     }, DISCONNECT_GRACE);
@@ -972,14 +731,11 @@ export class GameRoom {
   }
 
   handleReconnect(userId: number) {
-    // Cancel disconnect timer
     const timer = this.disconnectTimers.get(userId);
     if (timer) { clearTimeout(timer); this.disconnectTimers.delete(userId); }
 
-    // Deactivate bot if active
     this.deactivateBotForPlayer(userId);
 
-    // Send full game state
     if (this.game) {
       const rp = this.players.find(p => p.userId === userId);
       if (rp) {
@@ -1000,9 +756,8 @@ export class GameRoom {
     player.disconnected = true;
     this.broadcastGameState();
 
-    // If it's this player's turn, trigger bot move
     if (this.game.turnIndex === player.id) {
-      this.scheduleBotMove(player.id);
+      this.bots.scheduleMove(player.id);
     }
   }
 
@@ -1013,134 +768,7 @@ export class GameRoom {
 
     player.isBot = false;
     player.disconnected = false;
-
-    // Clear bot timer
-    const bt = this.botTimers.get(userId);
-    if (bt) { clearTimeout(bt); this.botTimers.delete(userId); }
-
-    this.broadcastGameState();
-  }
-
-  private scheduleBotMove(playerId: number) {
-    if (!this.game) return;
-    const g = this.game;
-    const player = g.players[playerId];
-    if (!player || !player.isBot) return;
-
-    // Clear any existing timer for this bot
-    const existing = this.botTimers.get(playerId);
-    if (existing) { clearTimeout(existing); this.botTimers.delete(playerId); }
-
-    const timer = setTimeout(() => {
-      this.executeBotMove(playerId);
-    }, 1000 + Math.random() * 1500); // 1-2.5s realistic delay
-    this.botTimers.set(playerId, timer);
-  }
-
-  private executeBotMove(playerId: number) {
-    if (!this.game) return;
-    const g = this.game;
-    const player = g.players[playerId];
-    if (!player || g.turnIndex !== playerId) return;
-
-    // Che phase bot: 60% chance to che
-    if (g.chePhase && player.canChe) {
-      if (Math.random() > 0.4) {
-        const cards = player.hand
-          .filter(c => c.rankValue === g.lastValidPlay!.rank)
-          .slice(0, 2);
-        if (cards.length === 2) {
-          this.executeCheBot(playerId, cards);
-          return;
-        }
-      }
-      this.declineChe(player.userId);
-      return;
-    }
-
-    // If che phase is active but bot can't che, wait (don't play through che)
-    if (g.chePhase) return;
-
-    // Normal bot play
-    const validPlays = generateAllValidPlays(player.hand, g.lastValidPlay, g.isFirstTurnOfGame);
-    if (validPlays.length > 0) {
-      // Pick the weakest valid play
-      const play = validPlays[0];
-      this.executeBotPlay(playerId, play);
-    } else {
-      // Pass — must check for pot collection (same logic as passTurn)
-      g.passStatuses[playerId] = true;
-      g.passCount++;
-      const activePlayers = g.players.filter(p => !p.finished);
-      const passedCount = activePlayers.filter(p => g.passStatuses[p.id]).length;
-      if (passedCount >= activePlayers.length - 1 && activePlayers.length > 1) {
-        g.pendingCollect = true;
-        g.pendingPassPlayerId = playerId;
-        this.collectTimer = setTimeout(() => this.collectPot(), 1000);
-      } else {
-        this.advanceTurn();
-      }
-      this.broadcastGameState();
-    }
-  }
-
-  private executeBotPlay(playerId: number, play: PlayInfo) {
-    if (!this.game) return;
-    this.executePlay(playerId, play.cards, play, false);
-
-    const g = this.game;
-    const player = g.players[playerId];
-
-    if (player.hand.length === 0) {
-      player.finished = true;
-      player.rank = ++g.rankCounter;
-      this.checkTeamVictory();
-      if (g.status === 'finished') {
-        this.endGame();
-        return;
-      }
-    }
-
-    if (g.players.filter(p => !p.finished).length === 1) {
-      this.checkGameOver();
-      if (g.status === 'finished') {
-        this.endGame();
-        return;
-      }
-    }
-
-    if (play.type === HAND_TYPES.SINGLE && !g.chePhase && !g.roundHasCheHappened) {
-      this.activateChePhase(playerId, play.cards[0].rankValue);
-    } else {
-      this.advanceTurn();
-    }
-
-    this.broadcastGameState();
-  }
-
-  private executeCheBot(playerId: number, cards: Card[]) {
-    if (!this.game) return;
-    const g = this.game;
-
-    this.clearCheTimers();
-    g.chePhase = false;
-    g.roundHasCheHappened = true;
-
-    cards.forEach(c => {
-      const idx = g.players[playerId].hand.findIndex(h => h.suit === c.suit && h.rankValue === c.rankValue);
-      if (idx >= 0) g.players[playerId].hand.splice(idx, 1);
-    });
-
-    g.lastValidPlay = { type: HAND_TYPES.CHE, rank: cards[0].rankValue, level: POWER_LEVEL.NORMAL, cards };
-    g.lastPlayByPlayerId = playerId;
-    g.passStatuses = [false, false, false, false];
-    g.passCount = 0;
-    g.roundHistory.push({ playerId, type: HAND_TYPES.CHE, rank: cards[0].rankValue, cards });
-
-    g.players.forEach(p => { p.canChe = false; });
-    g.turnIndex = this.findNextPlayer(playerId);
-
-    this.startTurnTimer();
+    this.bots.clearTimer(userId);
     this.broadcastGameState();
   }
 
@@ -1152,8 +780,7 @@ export class GameRoom {
     if (this.collectTimer) { clearTimeout(this.collectTimer); this.collectTimer = null; }
     this.disconnectTimers.forEach(t => clearTimeout(t));
     this.disconnectTimers.clear();
-    this.botTimers.forEach(t => clearTimeout(t));
-    this.botTimers.clear();
+    this.bots.clearAll();
     this.game = null;
   }
 }

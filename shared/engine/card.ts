@@ -1,11 +1,15 @@
-// Server-side Card class (pure data, no display getters needed)
+// Shared Card class — single source of truth for both frontend and server
+// Merged from server/src/engine/card.ts + src/engine/card.js
+
 export class Card {
   suit: number;      // 0=diamond, 1=club, 2=heart, 3=spade
   rankValue: number; // 4-16 (16=Red3)
+  isSelected: boolean; // UI-only: card selection state (frontend)
 
   constructor(suit: number, rankValue: number) {
     this.suit = suit;
     this.rankValue = rankValue;
+    this.isSelected = false;
   }
 
   get isRed3(): boolean {
@@ -31,7 +35,7 @@ export class Card {
     return RANK_DISPLAY[this.rankValue] || String(this.rankValue);
   }
 
-  // For JSON serialization (client needs display info)
+  // For JSON serialization (client needs display info after network transfer)
   toJSON() {
     return {
       suit: this.suit,
@@ -41,6 +45,7 @@ export class Card {
       color: this.color,
       isRed3: this.isRed3,
       isH4: this.isH4,
+      isSelected: this.isSelected,
     };
   }
 }

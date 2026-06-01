@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { GameEngine, type Card } from '../lib/engine';
 import { networkClient, type ConnectionStatus } from '../network/NetworkGameClient';
 
 // ===== Auth State =====
@@ -20,10 +19,6 @@ interface OnlineState {
 
 // ===== Full Store =====
 interface GameStoreState {
-  // Engine (local mode)
-  engine: GameEngine | null;
-  gameState: any;
-
   // Auth
   auth: AuthState;
   login: (token: string, userId: number, nickname: string, username: string) => void;
@@ -39,16 +34,9 @@ interface GameStoreState {
   players: any[];
   mySeat: number;
 
-  // UI state
-  showSettlement: boolean;
-  isOnline: boolean;
-
   // Actions
-  initLocalGame: (players: any[], config: any) => void;
-  setGameState: (state: any) => void;
   setRoomCode: (code: string) => void;
   setPlayers: (players: any[]) => void;
-  setIsOnline: (online: boolean) => void;
   connectToServer: (token: string) => Promise<void>;
 }
 
@@ -76,10 +64,7 @@ function saveAuth(auth: AuthState) {
   }
 }
 
-export const useGameStore = create<GameStoreState>((set, get) => ({
-  engine: null,
-  gameState: null,
-
+export const useGameStore = create<GameStoreState>((set) => ({
   auth: loadAuth(),
 
   login: (token, userId, nickname, username) => {
@@ -92,7 +77,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     networkClient.disconnect();
     const auth: AuthState = { token: null, userId: null, nickname: null, username: null, isLoggedIn: false };
     saveAuth(auth);
-    set({ auth, isOnline: false });
+    set({ auth });
   },
 
   online: {
@@ -111,19 +96,9 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   roomCode: '',
   players: [],
   mySeat: 0,
-  showSettlement: false,
-  isOnline: false,
 
-  initLocalGame: (players, config) => {
-    const engine = new GameEngine();
-    engine.createGame(players, config);
-    set({ engine, gameState: engine.getState(), isOnline: false });
-  },
-
-  setGameState: (state) => set({ gameState: state }),
   setRoomCode: (code) => set({ roomCode: code }),
   setPlayers: (players) => set({ players }),
-  setIsOnline: (online) => set({ isOnline: online }),
 
   connectToServer: async (token: string) => {
     await networkClient.connect(token);

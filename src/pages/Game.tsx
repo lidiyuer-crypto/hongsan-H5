@@ -1,148 +1,20 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import GameEngine, { attachAllCards } from '../engine/gameEngine';
 import { analyze, canBeat, generateAllValidPlays } from '../engine/analyzer';
 import { HAND_TYPES, RANK_DISPLAY, SUITS } from '../engine/constants';
 import { playSound, isMuted, setMuted } from '../lib/sound';
 import { networkClient } from '../network/NetworkGameClient';
-import type { GameStateData, SettlementData, PlayerView } from '../network/types';
-
-// ===== Helpers =====
-function cardDisplay(c: any) {
-  return {
-    rank: (c && (c.displayRank || RANK_DISPLAY[c.rankValue])) || '?',
-    suit: (c && (c.suitChar || SUITS[c.suit])) || '',
-    color: (c && (c.suit === 0 || c.suit === 2)) ? 'red' : 'black',
-    isRed3: c && (c.isRed3 || (c.rankValue === 16 && (c.suit === 0 || c.suit === 2))),
-    isH4: c && (c.isH4 || (c.suit === 2 && c.rankValue === 4)),
-    rankValue: c ? c.rankValue : 0,
-    suitVal: c ? c.suit : 0,
-  };
-}
-
-function cardKey(c: any) {
-  return (c.suit) + '_' + (c.rankValue);
-}
-
-const RANK_NAMES = ['上游', '前中游', '后中游', '下游'];
-const RANK_CLASSES = ['rank-1', 'rank-2', 'rank-3', 'rank-4'];
-
-// ===== Default GameUI State =====
-function defaultGameUI(): GameUIState {
-  return {
-    myPlayerId: 0,
-    myHand: [] as any[],
-    myPot: 0,
-    myName: '我',
-    myTeamText: '未知身份',
-    myTeamClass: 'unknown',
-    p1Cards: [], p2Cards: [], p3Cards: [],
-    p1Pot: 0, p2Pot: 0, p3Pot: 0,
-    p1Name: '玩家A', p2Name: '玩家B', p3Name: '玩家C',
-    p1TeamText: '未知身份', p2TeamText: '未知身份', p3TeamText: '未知身份',
-    p1TeamClass: 'unknown', p2TeamClass: 'unknown', p3TeamClass: 'unknown',
-    p1Revealed: false, p2Revealed: false, p3Revealed: false,
-    p1Rank: 0, p2Rank: 0, p3Rank: 0,
-    p1RankLabel: '', p2RankLabel: '', p3RankLabel: '',
-    faceDownP1: true, faceDownP2: true, faceDownP3: true,
-    p1CardCount: 13, p2CardCount: 13, p3CardCount: 13,
-    showHandCount: true,
-    currentFans: 0,
-    turnIndex: -1,
-    lastValidPlay: null as any,
-    playSlots: [
-      { cards: [], passed: false, isChe: false },
-      { cards: [], passed: false, isChe: false },
-      { cards: [], passed: false, isChe: false },
-      { cards: [], passed: false, isChe: false },
-    ],
-    passFlashSlot: -1,
-    historyCards: [] as any[],
-    tablePotCount: 0,
-    showControls: false,
-    showCheControls: false,
-    canChe: false,
-    showTimer: false,
-    timerPercent: 100,
-    turnTimePercent: 100,
-    isManaged: false,
-    showSettlement: false,
-    settlementTitle: '',
-    settlementReason: '',
-    settlementWinnerTeam: 'red',
-    settlementBaseAmount: 0,
-    settlementDoubleTypeText: '',
-    settlementFans: 0,
-    settlementAmount: 0,
-    settlementFansAmount: 0,
-    settlementBombFans: 0,
-    settlementExtraFans: 0,
-    settlementExtraFansLabel: '',
-    settlementBombDetails: [] as Array<{ playerId: number; playerName: string; type: string; fans: number; cards: Array<{ suit: number; rankValue: number }> }>,
-    settlementNetResults: [] as any[],
-    settlementRedPlayers: [] as any[],
-    settlementBlackPlayers: [] as any[],
-    settlementRedTotal: 0, settlementBlackTotal: 0,
-    settlementRedBonus: 0, settlementBlackBonus: 0,
-    settlementRedFinal: 0, settlementBlackFinal: 0,
-    settlementShowFormula: false,
-    settlementCurrentRound: 1,
-    settlementTotalRounds: 8,
-    settlementIsLastRound: false,
-    showScorePanel: false,
-    scorePanelPlayers: [] as any[],
-    scorePanelCurrentRound: 1,
-    scorePanelTotalRounds: 8,
-    showSelfCheDialog: false,
-    selfCheCards: null as any[] | null,
-  };
-}
-
-interface GameUIState {
-  myPlayerId: number; myHand: any[]; myPot: number;
-  myName: string; myTeamText: string; myTeamClass: string;
-  p1Cards: any[]; p2Cards: any[]; p3Cards: any[];
-  p1Pot: number; p2Pot: number; p3Pot: number;
-  p1Name: string; p2Name: string; p3Name: string;
-  p1TeamText: string; p2TeamText: string; p3TeamText: string;
-  p1TeamClass: string; p2TeamClass: string; p3TeamClass: string;
-  p1Revealed: boolean; p2Revealed: boolean; p3Revealed: boolean;
-  p1Rank: number; p2Rank: number; p3Rank: number;
-  p1RankLabel: string; p2RankLabel: string; p3RankLabel: string;
-  faceDownP1: boolean; faceDownP2: boolean; faceDownP3: boolean;
-  p1CardCount: number; p2CardCount: number; p3CardCount: number;
-  showHandCount: boolean;
-  currentFans: number;
-  turnIndex: number; lastValidPlay: any;
-  playSlots: Array<{ cards: any[]; passed: boolean; isChe?: boolean }>;
-  passFlashSlot: number; historyCards: any[]; tablePotCount: number;
-  showControls: boolean; showCheControls: boolean; canChe: boolean;
-  showTimer: boolean; timerPercent: number; turnTimePercent: number;
-  isManaged: boolean;
-  showSettlement: boolean; settlementTitle: string; settlementReason: string;
-  settlementWinnerTeam: string; settlementBaseAmount: number;
-  settlementDoubleTypeText: string; settlementFans: number;
-  settlementAmount: number; settlementFansAmount: number;
-  settlementBombFans: number; settlementExtraFans: number;
-  settlementExtraFansLabel: string; settlementBombDetails: Array<{ playerId: number; playerName: string; type: string; fans: number; cards: Array<{ suit: number; rankValue: number }> }>;
-  settlementNetResults: any[]; settlementRedPlayers: any[]; settlementBlackPlayers: any[];
-  settlementRedTotal: number; settlementBlackTotal: number;
-  settlementRedBonus: number; settlementBlackBonus: number;
-  settlementRedFinal: number; settlementBlackFinal: number;
-  settlementShowFormula: boolean;
-  settlementCurrentRound: number; settlementTotalRounds: number;
-  settlementIsLastRound: boolean;
-  showScorePanel: boolean; scorePanelPlayers: any[];
-  scorePanelCurrentRound: number; scorePanelTotalRounds: number;
-  showSelfCheDialog: boolean; selfCheCards: any[] | null;
-}
+import type { GameStateData, SettlementData } from '../network/types';
+import { cardDisplay, RANK_CLASSES, defaultGameUI } from '../game/types';
+import type { GameUIState } from '../game/types';
+import { computeGameUI } from '../game/GameRenderer';
+import { computeSettlementUI } from '../game/SettlementRenderer';
 
 // ===== COMPONENT =====
 export default function Game() {
   const { gameId } = useParams<{ gameId: string }>();
   const navigate = useNavigate();
 
-  const engineRef = useRef<GameEngine | null>(null);
   const turnTimerRef = useRef<ReturnType<typeof setInterval>>();
   const cheTimerRef = useRef<ReturnType<typeof setInterval>>();
   const autoPlayTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -151,7 +23,6 @@ export default function Game() {
   const lastChePhaseRef = useRef(false);
   const lastFinishedRef = useRef(new Set<number>());
   const lastRevealedRef = useRef(new Set<number>());
-  const settlementRef = useRef<any>(null);
 
   // Touch/mouse state
   const touchRef = useRef<{
@@ -171,10 +42,7 @@ export default function Game() {
   // Hint state
   const hintRef = useRef<{ key: string; index: number }>({ key: '', index: 0 });
 
-  // Online mode detection
-  const isOnline = gameId?.startsWith('online-') ?? false;
-  const isOnlineRef = useRef(isOnline);
-  isOnlineRef.current = isOnline;
+  // Online mode — always connected via networkClient
   const settlementListenerRef = useRef<(() => void) | null>(null);
   const stateListenerRef = useRef<(() => void) | null>(null);
 
@@ -192,238 +60,18 @@ export default function Game() {
     toastTimerRef.current = setTimeout(() => setToastMsg(''), 2500);
   };
 
-  // ===== renderOnlineGameState (maps server state to GameUIState) =====
+  // ===== renderOnlineGameState (delegates to GameRenderer) =====
   const renderOnlineGameState = useCallback((state: GameStateData) => {
-    const mySeat = state.mySeat;
-    const myPlayer = state.players[mySeat];
-    const opponents = [1, 2, 3].map(offset => state.players[(mySeat + offset) % 4]);
-
-    // Map my hand - server sends full cards with suit/rankValue/displayRank etc.
-    const myHand = myPlayer.hand.map((c: any) => ({
-      ...c, isSelected: false,
-    }));
-
-    // Preserve selection state
-    const prevMyHand = uiRef.current.myHand;
-    if (prevMyHand.length === myHand.length) {
-      const prevSel = new Map<string, boolean>();
-      prevMyHand.forEach((c: any) => { if (c.isSelected) prevSel.set(cardKey(c), true); });
-      myHand.forEach((c: any) => { if (prevSel.has(cardKey(c))) c.isSelected = true; });
-    }
-
-    // Determine team text/class
-    const getTeamInfo = (p: PlayerView, isMe: boolean) => {
-      if (isMe && state.isBusinessMode && state.players[mySeat] === p) {
-        return p.isRed3Team ? { text: '红三(业务)', cls: 'red3' } : { text: '未知身份', cls: 'unknown' };
-      }
-      if (!p.revealed) return { text: '未知身份', cls: 'unknown' };
-      if (state.isBusinessMode && state.businessPlayerId === p.id) return { text: '红三(业务)', cls: 'red3' };
-      if (p.isRed3Team) return { text: '红三阵营', cls: 'red3' };
-      return { text: '黑三阵营', cls: 'black3' };
-    };
-
-    const myTeam = getTeamInfo(myPlayer, true);
-    const t1 = getTeamInfo(opponents[0], false);
-    const t2 = getTeamInfo(opponents[1], false);
-    const t3 = getTeamInfo(opponents[2], false);
-
-    // Build play slots — hide pass tag for the pending-pass player (show flash instead)
-    const playSlots = state.passStatuses.map((passed, i) => ({
-      cards: (i === state.lastPlayByPlayerId && state.lastValidPlay)
-        ? state.lastValidPlay.cards : [],
-      passed: passed && !(state.pendingCollect && i === state.pendingPassPlayerId && i !== state.lastPlayByPlayerId),
-      isChe: !!(state.lastValidPlay && state.lastValidPlay.type === HAND_TYPES.CHE && i === state.lastPlayByPlayerId),
-    }));
-
-    // Che phase - check if my player can che
-    const myCanChe = myPlayer.canChe || false;
-
-    const data: Partial<GameUIState> = {
-      myPlayerId: mySeat,
-      myHand,
-      myPot: myPlayer.pot,
-      myName: myPlayer.name,
-      myTeamText: myTeam.text,
-      myTeamClass: myTeam.cls,
-
-      p1Cards: opponents[0].hand || [],
-      p2Cards: opponents[1].hand || [],
-      p3Cards: opponents[2].hand || [],
-      p1Pot: opponents[0].pot,
-      p2Pot: opponents[1].pot,
-      p3Pot: opponents[2].pot,
-      p1Name: opponents[0].name,
-      p2Name: opponents[1].name,
-      p3Name: opponents[2].name,
-      p1TeamText: t1.text, p2TeamText: t2.text, p3TeamText: t3.text,
-      p1TeamClass: t1.cls, p2TeamClass: t2.cls, p3TeamClass: t3.cls,
-      p1Revealed: opponents[0].revealed,
-      p2Revealed: opponents[1].revealed,
-      p3Revealed: opponents[2].revealed,
-      p1Rank: opponents[0].rank || 0,
-      p2Rank: opponents[1].rank || 0,
-      p3Rank: opponents[2].rank || 0,
-      p1RankLabel: opponents[0].rank ? RANK_NAMES[opponents[0].rank - 1] : '',
-      p2RankLabel: opponents[1].rank ? RANK_NAMES[opponents[1].rank - 1] : '',
-      p3RankLabel: opponents[2].rank ? RANK_NAMES[opponents[2].rank - 1] : '',
-
-      faceDownP1: !state.players.find(p => p.id === opponents[0].id)?.revealed,
-      faceDownP2: !state.players.find(p => p.id === opponents[1].id)?.revealed,
-      faceDownP3: !state.players.find(p => p.id === opponents[2].id)?.revealed,
-      p1CardCount: opponents[0].handCount,
-      p2CardCount: opponents[1].handCount,
-      p3CardCount: opponents[2].handCount,
-      showHandCount: state.config.showHandCount,
-
-      currentFans: state.currentFans,
-      turnIndex: state.turnIndex,
-      lastValidPlay: state.lastValidPlay,
-      playSlots,
-      passFlashSlot: state.pendingPassPlayerId !== undefined ? state.pendingPassPlayerId : -1,
-      historyCards: state.historyCards,
-      tablePotCount: state.tablePotCount,
-
-      showControls: state.turnIndex === mySeat && !state.chePhase && state.status === 'playing',
-      showCheControls: state.chePhase && myCanChe && !state.cheTimerExpired,
-      canChe: myCanChe,
-      showTimer: state.chePhase,
-      timerPercent: state.chePhaseStartedAt
-        ? Math.max(0, (3000 - (Date.now() - state.chePhaseStartedAt)) / 30)
-        : 100,
-      turnTimePercent: 100,
-    };
-
-    // Che phase: auto-select matching cards (same as local)
-    if (state.chePhase && myCanChe && !state.cheTimerExpired && state.lastValidPlay) {
-      const rank = state.lastValidPlay.rank;
-      let found = 0;
-      for (const card of myHand) {
-        if (card.rankValue === rank && found < 2) {
-          card.isSelected = true;
-          found++;
-        }
-      }
-      data.myHand = myHand;
-    }
-
-    // Finished state: reveal all opponent cards
-    if (state.status === 'finished') {
-      data.faceDownP1 = false; data.faceDownP2 = false; data.faceDownP3 = false;
-    }
-
-    // Business player red3 count detail
-    if (state.isBusinessMode) {
-      opponents.forEach((p: PlayerView, i: number) => {
-        if (p.id === state.businessPlayerId) {
-          const bpRed3Count = (state as any).red3CountByPlayer?.[p.id] || 0;
-          const idx = ['p1', 'p2', 'p3'][i];
-          if (bpRed3Count >= 2) {
-            (data as any)[idx + 'TeamText'] = '💼 做业务';
-            (data as any)[idx + 'TeamClass'] = 'solo';
-          }
-        }
-      });
-    }
-
+    const data = computeGameUI(state, uiRef.current);
     setGameUI(prev => ({ ...prev, ...data }));
     return data;
   }, []);
 
-  // ===== renderOnlineSettlement =====
+  // ===== renderOnlineSettlement (delegates to SettlementRenderer) =====
   const renderOnlineSettlement = useCallback((result: SettlementData) => {
-    const nameMap: Record<number, string> = { 0: '玩家', 1: '玩家A', 2: '玩家B', 3: '玩家C' };
-    // Try to get real names from game state
     const gs = gameStateRef.current as GameStateData | null;
-    if (gs) {
-      gs.players.forEach(p => { nameMap[p.id] = p.name; });
-    }
-
-    // Beiguan detection: players who didn't finish are "被关"
-    const netResults = result.results.map(r => {
-      const player = gs?.players.find(p => p.id === r.playerId);
-      const isBeiguan = player && (!player.finished || (player.hand && player.hand.length > 0));
-      return {
-        ...r,
-        playerName: nameMap[r.playerId] || r.name,
-        rankName: isBeiguan ? '被关' : r.rankName,
-        rankClass: isBeiguan ? 'rank-beiguan' : (r.rank ? ['rank-1', 'rank-2', 'rank-3', 'rank-4'][r.rank - 1] : ''),
-      };
-    }).sort((a, b) => b.netWon - a.netWon);
-
-    const redPlayers = result.results.filter(r => r.isRed3Team);
-    const blackPlayers = result.results.filter(r => !r.isRed3Team);
-    const redTotal = redPlayers.reduce((s, r) => s + r.pot, 0);
-    const blackTotal = blackPlayers.reduce((s, r) => s + r.pot, 0);
-    const doubleTypeText = gs?.config.doubleType === 'steep' ? '陡翻' : '平翻';
-
-    // Team pot bonus (tribute)
-    const tb = result.teamPotBonus || { red_team: 0, black_team: 0 };
-    const redBonus = tb.red_team || 0;
-    const blackBonus = tb.black_team || 0;
-    const showFormula = redBonus !== 0 || blackBonus !== 0;
-
-    const titleMap: Record<string, string> = {
-      '双关': '双关胜利！', '业务胜利': '业务玩家胜利！',
-      '非业务玩家胜利': '非业务玩家胜利！', '章子比拼': '章子比拼获胜！',
-    };
-
-    const reasonMap: Record<string, string> = {
-      '双关': '同阵营玩家以第一、二名完成！',
-      '业务胜利': '业务玩家成功关住了其他玩家',
-      '非业务玩家胜利': '业务失败！三家逃脱',
-      '章子比拼': '两队章子总数比拼获胜',
-    };
-
-    const bombDetails = result.bombDetails.map(b => ({
-      playerId: b.playerId,
-      playerName: nameMap[b.playerId] || ('玩家' + b.playerId),
-      type: b.type,
-      fans: b.fans,
-      cards: b.cards || [],
-    }));
-
-    setBombExpanded(false);
-
-    setGameUI(prev => ({
-      ...prev,
-      showSettlement: true,
-      settlementTitle: titleMap[result.victoryReason] || `${result.victoryTeam === 'red' ? '红三' : '黑三'}阵营胜利`,
-      settlementReason: reasonMap[result.victoryReason] || '',
-      settlementWinnerTeam: result.victoryTeam === 'business' ? 'red' : (result.victoryTeam || 'red'),
-      settlementBaseAmount: gs?.config.baseAmount || 5,
-      settlementDoubleTypeText: doubleTypeText,
-      settlementFans: result.fans,
-      settlementAmount: result.amount,
-      settlementFansAmount: result.amount - (gs?.config.baseAmount || 5),
-      settlementBombFans: result.bombFans,
-      settlementExtraFans: result.extraFans,
-      settlementExtraFansLabel: result.extraFansLabel,
-      settlementBombDetails: bombDetails,
-      settlementNetResults: netResults,
-      settlementRedPlayers: redPlayers,
-      settlementBlackPlayers: blackPlayers,
-      settlementRedTotal: redTotal,
-      settlementBlackTotal: blackTotal,
-      settlementRedBonus: redBonus,
-      settlementBlackBonus: blackBonus,
-      settlementRedFinal: redPlayers.reduce((s, r) => s + r.netWon, 0),
-      settlementBlackFinal: blackPlayers.reduce((s, r) => s + r.netWon, 0),
-      settlementShowFormula: showFormula,
-      settlementCurrentRound: result.currentRound,
-      settlementTotalRounds: result.totalRounds,
-      settlementIsLastRound: result.isLastRound,
-    }));
-
-    if (result.isLastRound) {
-      setTimeout(() => playSound('settlement_final'), 600);
-    } else {
-      const humanPlayer = result.results.find(r => r.playerId === (gs?.mySeat ?? 0));
-      if (humanPlayer && humanPlayer.netWon >= 0) {
-        setTimeout(() => playSound('settlement_win'), 600);
-      } else {
-        setTimeout(() => playSound('settlement_lose'), 600);
-      }
-    }
+    const data = computeSettlementUI(result, gs, uiRef.current, setBombExpanded);
+    setGameUI(prev => ({ ...prev, ...data }));
   }, []);
 
   // ===== Shared sound detection (works for both local engine state and online GameStateData) =====
@@ -472,161 +120,6 @@ export default function Game() {
     } else if (!data.showTimer && cheTimerRef.current) {
       clearCheTimer();
     }
-  }, []);
-
-  // ===== renderGameState =====
-  const renderGameState = useCallback(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    const gs = engine.getState();
-    if (!gs) return;
-    gameStateRef.current = gs;
-
-    const myPlayerId = 0;
-    const myPlayer = gs.players[0];
-    const opponents = [gs.players[1], gs.players[2], gs.players[3]];
-
-    // Preserve isSelected across renders
-    const curSel: Record<string, boolean> = {};
-    (uiRef.current.myHand || []).forEach((c: any) => {
-      if (c.isSelected) curSel[cardKey(c)] = true;
-    });
-
-    const data: any = {
-      myPlayerId: 0,
-      myHand: (myPlayer ? myPlayer.hand : []).map((c: any) => ({
-        ...c,
-        isSelected: !!curSel[cardKey(c)],
-      })),
-      myPot: myPlayer ? myPlayer.pot : 0,
-      myName: myPlayer ? (myPlayer.name || '我') : '我',
-      p1Name: opponents[0] ? (opponents[0].name || '玩家A') : '玩家A',
-      p2Name: opponents[1] ? (opponents[1].name || '玩家B') : '玩家B',
-      p3Name: opponents[2] ? (opponents[2].name || '玩家C') : '玩家C',
-      turnIndex: gs.turnIndex,
-      lastValidPlay: gs.lastValidPlay,
-      historyCards: gs.historyCards || [],
-      showCheControls: false,
-      canChe: myPlayer ? myPlayer.canChe === true : false,
-      myTeamText: gs.isBusinessMode && gs.businessPlayerId === 0
-        ? '💼 做业务'
-        : (myPlayer && myPlayer.isRed3Team ? '🚩 红三' : '⚑ 黑三'),
-      myTeamClass: gs.isBusinessMode && gs.businessPlayerId === 0
-        ? 'solo'
-        : (myPlayer && myPlayer.isRed3Team ? 'red3' : 'black3'),
-      // Real-time fan counter — sum bomb/h-bomb from roundHistory
-      currentFans: (gs.roundHistory || []).reduce((sum: number, r: any) => {
-        if (r.type === HAND_TYPES.BOMB) return sum + 1;
-        if (r.type === HAND_TYPES.H_BOMB) return sum + 2;
-        return sum;
-      }, 0),
-    };
-
-    // Che phase: auto-select matching cards
-    if (gs.chePhase && myPlayer && myPlayer.canChe && !gs.cheTimerExpired) {
-      const rank = gs.lastValidPlay.rank;
-      const myHandCopy = myPlayer.hand.map((c: any) => ({ ...c }));
-      let found = 0;
-      for (const card of myHandCopy) {
-        if (card.rankValue === rank && found < 2) {
-          card.isSelected = true;
-          found++;
-        }
-      }
-      data.myHand = myHandCopy;
-      data.showCheControls = true;
-    }
-
-    const botRevealed = gs.config && gs.config.botRevealed;
-
-    opponents.forEach((p: any, i: number) => {
-      const idx = ['p1', 'p2', 'p3'][i];
-      data[idx + 'Cards'] = (p && p.hand) ? p.hand.map((c: any) => ({ ...c })) : [];
-      data[idx + 'Pot'] = p ? p.pot : 0;
-      data[idx + 'Revealed'] = p ? p.revealed === true : false;
-      data[idx + 'Rank'] = p ? (p.rank || 0) : 0;
-      data[idx + 'RankLabel'] = (p && p.rank) ? RANK_NAMES[p.rank - 1] : '';
-      data[idx + 'CardCount'] = (p && p.hand) ? p.hand.length : 0;
-      data['faceDown' + idx.charAt(0).toUpperCase() + idx.charAt(1)] = !(botRevealed && p && p.isBot);
-
-      if (p && (p.revealed === true || p.id === myPlayerId)) {
-        if (gs.isBusinessMode && p.id === gs.businessPlayerId) {
-          const bpRed3Count = (gs.red3CountByPlayer && gs.red3CountByPlayer[p.id]) || 0;
-          if (bpRed3Count >= 2) {
-            data[idx + 'TeamText'] = '💼 做业务';
-            data[idx + 'TeamClass'] = 'solo';
-          } else {
-            data[idx + 'TeamText'] = '🚩 红三';
-            data[idx + 'TeamClass'] = 'red3';
-          }
-        } else {
-          data[idx + 'TeamText'] = p.isRed3Team ? '🚩 红三' : '⚑ 黑三';
-          data[idx + 'TeamClass'] = p.isRed3Team ? 'red3' : 'black3';
-        }
-      } else {
-        data[idx + 'TeamText'] = '未知身份';
-        data[idx + 'TeamClass'] = 'unknown';
-      }
-    });
-
-    if (gs.status === 'finished') {
-      data.faceDownP1 = false; data.faceDownP2 = false; data.faceDownP3 = false;
-    }
-
-    // Play slots
-    const playSlots: any[] = [
-      { cards: [], passed: false },
-      { cards: [], passed: false },
-      { cards: [], passed: false },
-      { cards: [], passed: false },
-    ];
-    if (gs.lastPlayByPlayerId >= 0 && gs.tableCards && gs.tableCards.length > 0) {
-      const isChePlay = gs.lastValidPlay && gs.lastValidPlay.type === HAND_TYPES.CHE;
-      playSlots[gs.lastPlayByPlayerId] = { cards: gs.tableCards, passed: false };
-      if (isChePlay) playSlots[gs.lastPlayByPlayerId].isChe = true;
-    }
-    if (gs.passStatuses) {
-      gs.passStatuses.forEach((passed: boolean, i: number) => {
-        if (passed && i !== gs.lastPlayByPlayerId && !(gs.pendingCollect && i === gs.pendingPassPlayerId)) {
-          playSlots[i] = { cards: [], passed: true };
-        }
-      });
-    }
-    if (gs.pendingCollect && gs.pendingPassPlayerId !== undefined && gs.pendingPassPlayerId !== gs.lastPlayByPlayerId) {
-      data.passFlashSlot = gs.pendingPassPlayerId;
-    } else {
-      data.passFlashSlot = -1;
-    }
-    data.playSlots = playSlots;
-
-    const tableTotal = (gs.tableCards ? gs.tableCards.length : 0) +
-      (gs.historyCards ? gs.historyCards.length : 0);
-    data.tablePotCount = tableTotal;
-
-    const isMyTurn = myPlayer && gs.turnIndex === 0 && !gs.chePhase;
-    data.showControls = isMyTurn;
-    data.showHandCount = gs.config && gs.config.showHandCount !== false;
-
-    if (uiRef.current.isManaged) {
-      if (data.showControls) data.showControls = false;
-      if (data.showCheControls) data.showCheControls = false;
-    }
-
-    // Che phase timer
-    if (gs.chePhase && gs.chePhaseStartedAt && !gs.cheTimerExpired) {
-      data.showTimer = true;
-      const elapsed = Date.now() - gs.chePhaseStartedAt;
-      const remaining = Math.max(0, 3000 - elapsed);
-      data.timerPercent = (remaining / 3000) * 100;
-    } else {
-      data.showTimer = false;
-      data.timerPercent = 100;
-    }
-
-    // ===== 音效检测 (shared between local and online) =====
-    detectGameSounds(gs);
-    setGameUI(prev => ({ ...prev, ...data }));
-    handleTurnAndTimers(gs, data);
   }, []);
 
   // ===== Turn Timer =====
@@ -701,12 +194,7 @@ export default function Game() {
   };
 
   const onCheTimerExpired = () => {
-    if (isOnlineRef.current) {
-      networkClient.declineChe();
-    } else {
-      engineRef.current?.endChePhase();
-      // onChange will trigger renderGameState
-    }
+    networkClient.declineChe();
   };
 
   // ===== Actions =====
@@ -723,23 +211,11 @@ export default function Game() {
   };
 
   const submitPlay = (cards: any[], isSelfChe: boolean, cheRemain: any[] | null) => {
-    if (isOnlineRef.current) {
-      networkClient.playCards(
-        cards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })),
-        isSelfChe || false,
-        cheRemain ? cheRemain.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })) : undefined
-      );
-      return;
-    }
-    const engine = engineRef.current;
-    if (!engine) return;
-    const result = engine.playCards(0, cards, isSelfChe || false, cheRemain);
-    if (!result.success) {
-      // Invalid play — deselect
-      setGameUI(prev => ({ ...prev, myHand: prev.myHand.map((c: any) => ({ ...c, isSelected: false })) }));
-    }
-    // onChange will trigger renderGameState
-    triggerBotIfNeeded();
+    networkClient.playCards(
+      cards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })),
+      isSelfChe || false,
+      cheRemain ? cheRemain.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })) : undefined
+    );
   };
 
   const doPlay = () => {
@@ -806,17 +282,8 @@ export default function Game() {
   };
 
   const doPass = () => {
-    if (isOnlineRef.current) {
-      playSound('pass_self');
-      networkClient.pass();
-      return;
-    }
-    const engine = engineRef.current;
-    if (!engine) return;
     playSound('pass_self');
-    engine.passTurn(0);
-    // onChange will trigger renderGameState
-    triggerBotIfNeeded();
+    networkClient.pass();
   };
 
   const handlePassClick = () => { cancelManagedIfNeeded(); doPass(); };
@@ -828,12 +295,7 @@ export default function Game() {
     const rank = gs.lastValidPlay.rank;
     const matchCards = uiRef.current.myHand.filter((c: any) => c.rankValue === rank).slice(0, 2);
     if (matchCards.length < 2) return;
-    if (isOnlineRef.current) {
-      networkClient.cheAction(matchCards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })));
-      return;
-    }
-    engineRef.current?.cheAction(0, matchCards);
-    triggerBotIfNeeded();
+    networkClient.cheAction(matchCards.map((c: any) => ({ suit: c.suit, rankValue: c.rankValue })));
   };
 
   const handleDeclineChe = () => {
@@ -842,11 +304,7 @@ export default function Game() {
       myHand: prev.myHand.map((c: any) => ({ ...c, isSelected: false })),
       showCheControls: false,
     }));
-    if (isOnlineRef.current) {
-      networkClient.declineChe();
-      return;
-    }
-    engineRef.current?.declineChe(0);
+    networkClient.declineChe();
   };
 
   // ===== Hint =====
@@ -981,13 +439,6 @@ export default function Game() {
         doPlay();
       }, 500);
     }, 800);
-  };
-
-  // ===== Bot Trigger =====
-  const triggerBotIfNeeded = () => {
-    const gs = gameStateRef.current;
-    if (!gs || gs.status === 'finished') return;
-    engineRef.current?.processBotMoves();
   };
 
   // ===== Touch Selection =====
@@ -1158,151 +609,9 @@ export default function Game() {
     t.lastEnd = null;
   };
 
-  // ===== Settlement =====
-  const loadSettlement = useCallback(() => {
-    const gs = gameStateRef.current;
-    const settlement = settlementRef.current;
-    if (!gs || !settlement) return;
-
-    setBombExpanded(false);
-
-    const players = gs.players || [];
-    const cfg = gs.config || {};
-
-    const { fans, bombFans, extraFans, extraFansLabel, bombDetails, results, amount } = settlement;
-
-    const rankClasses = ['rank-1', 'rank-2', 'rank-3', 'rank-4'];
-    const doubleTypeText = cfg.doubleType === 'steep' ? '陡翻' : '平翻';
-
-    let titleText = '牌局结算';
-    let reasonText = '';
-    if (gs.victoryReason === '双关') {
-      titleText = gs.victoryTeam === 'red' ? '🚩 红三阵营胜利' : '⚑ 黑三阵营胜利';
-      reasonText = '双关！同阵营玩家以第一、二名完成！';
-    } else if (gs.victoryReason === '业务胜利') {
-      titleText = '💼 业务玩家胜利';
-      const notFinished = players.filter((p: any) => !p.finished || p.hand?.length > 0).length;
-      reasonText = '关住了' + notFinished + '名玩家，业务成功！';
-    } else if (gs.victoryReason === '非业务玩家胜利') {
-      titleText = gs.victoryTeam === 'red' ? '🚩 红三阵营胜利' : '⚑ 黑三阵营胜利';
-      reasonText = '业务失败！';
-    } else if (gs.victoryReason === '章子比拼') {
-      titleText = gs.victoryTeam === 'red' ? '🚩 红三阵营胜利' : '⚑ 黑三阵营胜利';
-      reasonText = '章子比拼获胜！';
-    }
-
-    const buildRow = (r: any) => {
-      const player = players[r.playerId];
-      const isBeiguan = player && (!player.finished || (player.hand && player.hand.length > 0));
-      return {
-        playerId: r.playerId,
-        name: player ? player.name : r.name,
-        rankName: isBeiguan ? '被关' : r.rankName,
-        rankClass: isBeiguan ? 'rank-beiguan' : (r.rank ? rankClasses[r.rank - 1] : ''),
-        pot: r.pot,
-        netWon: r.netWon,
-        isSolo: gs.isBusinessMode && r.playerId === gs.businessPlayerId,
-      };
-    };
-
-    const allResults = results.map(buildRow);
-    const redPlayers = allResults.filter((r: any) => {
-      const p = players[r.playerId];
-      return p && p.isRed3Team;
-    });
-    const blackPlayers = allResults.filter((r: any) => {
-      const p = players[r.playerId];
-      return p && !p.isRed3Team;
-    });
-
-    const redTotal = redPlayers.reduce((s: number, r: any) => s + r.pot, 0);
-    const blackTotal = blackPlayers.reduce((s: number, r: any) => s + r.pot, 0);
-
-    let redBonus = 0, blackBonus = 0;
-    if (gs.teamPotBonus) {
-      redBonus = gs.teamPotBonus.red_team || 0;
-      blackBonus = gs.teamPotBonus.black_team || 0;
-    }
-    const redFinal = redTotal + redBonus;
-    const blackFinal = blackTotal + blackBonus;
-    const showFormula = (redBonus !== 0 || blackBonus !== 0);
-
-    const bombDetailsMapped = bombDetails.map((b: any) => {
-      const p = players[b.playerId];
-      return {
-        playerId: b.playerId,
-        playerName: p ? p.name : ('玩家' + (b.playerId + 1)),
-        type: b.type,
-        fans: b.fans,
-        cards: b.cards || [],
-      };
-    });
-
-    const winnerTeam = gs.victoryTeam === 'business' ? 'red' : (gs.victoryTeam || 'red');
-    const isLastRound = (gs.currentRound >= (gs.totalRounds || 8));
-
-    // 结算音效
-    playSound('settlement_show');
-    setTimeout(() => {
-      const myPlayer = gs.players[0];
-      const iWon = myPlayer && myPlayer.isRed3Team
-        ? (winnerTeam === 'red')
-        : (winnerTeam !== 'red' && winnerTeam !== 'business');
-      if (isLastRound) playSound('settlement_final');
-      else if (iWon) playSound('settlement_win');
-      else playSound('settlement_lose');
-    }, 600);
-
-    setGameUI(prev => ({
-      ...prev,
-      showSettlement: true,
-      settlementTitle: titleText,
-      settlementReason: reasonText,
-      settlementWinnerTeam: winnerTeam,
-      settlementIsLastRound: isLastRound,
-      settlementCurrentRound: gs.currentRound || 1,
-      settlementTotalRounds: gs.totalRounds || 8,
-      settlementRedPlayers: redPlayers,
-      settlementBlackPlayers: blackPlayers,
-      settlementRedTotal: redTotal, settlementBlackTotal: blackTotal,
-      settlementRedBonus: redBonus, settlementBlackBonus: blackBonus,
-      settlementRedFinal: redFinal, settlementBlackFinal: blackFinal,
-      settlementShowFormula: showFormula,
-      settlementBaseAmount: cfg.baseAmount || 0,
-      settlementDoubleTypeText: doubleTypeText,
-      settlementFans: fans,
-      settlementAmount: amount,
-      settlementFansAmount: amount - (cfg.baseAmount || 0),
-      settlementBombFans: bombFans,
-      settlementExtraFans: extraFans,
-      settlementExtraFansLabel: extraFansLabel,
-      settlementBombDetails: bombDetailsMapped,
-      settlementNetResults: allResults.sort((a: any, b: any) => b.netWon - a.netWon),
-    }));
-  }, []);
-
   const handleNextRound = () => {
-    if (isOnlineRef.current) {
-      networkClient.nextRound();
-      setGameUI(prev => ({
-        ...prev,
-        showSettlement: false,
-        playSlots: [
-          { cards: [], passed: false }, { cards: [], passed: false },
-          { cards: [], passed: false }, { cards: [], passed: false },
-        ],
-        historyCards: [],
-        tablePotCount: 0,
-        showControls: false,
-        showCheControls: false,
-        showTimer: false,
-      }));
-      return;
-    }
-    const engine = engineRef.current;
-    if (!engine) return;
-    const result = engine.nextRound();
-    if (!result.success) return;
+    networkClient.nextRound();
+    lastTurnIndexRef.current = -1;
     setGameUI(prev => ({
       ...prev,
       showSettlement: false,
@@ -1316,12 +625,6 @@ export default function Game() {
       showCheControls: false,
       showTimer: false,
     }));
-    gameStateRef.current = engine.getState();
-    if (gameStateRef.current) {
-      lastTurnIndexRef.current = -1;
-      renderGameState();
-      triggerBotIfNeeded();
-    }
   };
 
   // ===== Score Panel =====
@@ -1348,139 +651,55 @@ export default function Game() {
   };
 
   const handleLeaveRoom = () => {
-    if (isOnlineRef.current) {
-      networkClient.leaveRoom();
-    }
-    engineRef.current?.destroy();
+    networkClient.leaveRoom();
     navigate('/');
   };
 
-  // ===== Init =====
-  const initEscapeRef = useRef(false);
-  const savedStateJsonRef = useRef<string | null>(null);
+  // ===== Init (online mode) =====
   useEffect(() => {
-    // ===== ONLINE MODE =====
-    if (isOnline) {
-      // Try to load initial state from sessionStorage (saved by Room.tsx on game_start)
-      const savedState = sessionStorage.getItem('onlineGameState');
-      if (savedState) {
-        try {
-          const state: GameStateData = JSON.parse(savedState);
-          gameStateRef.current = state;
-          renderOnlineGameState(state);
-          sessionStorage.removeItem('onlineGameState');
-        } catch {}
-      }
-
-      // Subscribe to live state updates
-      stateListenerRef.current = networkClient.onStateChange((state: GameStateData) => {
-        gameStateRef.current = state;
-        if (state.status === 'finished') {
-          clearTurnTimer();
-          clearCheTimer();
-          // Settlement will arrive via onSettlement
-          return;
-        }
-        const uiData = renderOnlineGameState(state);
-        detectGameSounds(state);
-        handleTurnAndTimers(state, uiData);
-      });
-
-      // Subscribe to server errors
-      const unsubError = networkClient.onError((msg) => { flashError(msg); });
-
-      // Subscribe to settlement
-      settlementListenerRef.current = networkClient.onSettlement((result: SettlementData) => {
-        gameStateRef.current && renderOnlineGameState(gameStateRef.current as GameStateData);
-        renderOnlineSettlement(result);
-      });
-
-      return () => {
-        clearTurnTimer();
-        clearCheTimer();
-        if (autoPlayTimerRef.current) clearTimeout(autoPlayTimerRef.current);
-        if (stateListenerRef.current) stateListenerRef.current();
-        if (settlementListenerRef.current) settlementListenerRef.current();
-        unsubError();
-      };
-    }
-
-    // ===== LOCAL MODE =====
-    let engine: GameEngine;
-    let created = false;
-
-    // Load saved state: from sessionStorage on first run, from ref on Strict Mode re-run (sessionStorage already cleared)
-    let saved: string | null = null;
-    if (!initEscapeRef.current) {
-      saved = sessionStorage.getItem('localGame');
-      if (saved) {
-        savedStateJsonRef.current = saved;
-        sessionStorage.removeItem('localGame');
-      }
-      initEscapeRef.current = true;
-    } else {
-      saved = savedStateJsonRef.current;
-    }
-
-    if (saved) {
+    // Try to load initial state from sessionStorage (saved by Room.tsx on game_start)
+    const savedState = sessionStorage.getItem('onlineGameState');
+    if (savedState) {
       try {
-        const state = JSON.parse(saved);
-        engine = new GameEngine();
-        engine._state = attachAllCards(state);
-      } catch {
-        engine = new GameEngine();
-        created = true;
-      }
-    } else {
-      engine = new GameEngine();
-      created = true;
+        const state: GameStateData = JSON.parse(savedState);
+        gameStateRef.current = state;
+        renderOnlineGameState(state);
+        sessionStorage.removeItem('onlineGameState');
+      } catch {}
     }
 
-    if (created) {
-      const players = [0, 1, 2, 3].map(i => ({
-        openid: `p${i}`,
-        name: i === 0 ? '我' : `电脑${['A','B','C'][i-1]}`,
-        isBot: i !== 0,
-      }));
-      engine.createGame(players, {
-        baseAmount: 5, doubleType: 'steep', smartShuffle: true,
-        smartShuffleLevel: 3, totalRounds: 8, showHandCount: true,
-      });
-    }
-
-    engineRef.current = engine;
-    const unsub = engine.onChange((state: any) => {
-      if (!state) return;
+    // Subscribe to live state updates
+    stateListenerRef.current = networkClient.onStateChange((state: GameStateData) => {
       gameStateRef.current = state;
       if (state.status === 'finished') {
         clearTurnTimer();
         clearCheTimer();
-        renderGameState();
-        settlementRef.current = engine.getSettlement(); // Triggers accumulatedScores update + caches result
-        loadSettlement();
+        // Settlement will arrive via onSettlement
         return;
       }
-      renderGameState();
-      triggerBotIfNeeded();
+      const uiData = renderOnlineGameState(state);
+      detectGameSounds(state);
+      handleTurnAndTimers(state, uiData);
     });
 
-    const gs = engine.getState();
-    gameStateRef.current = gs;
-    lastTurnIndexRef.current = -1; // Ensure timer starts on first renderGameState
-    renderGameState();
+    // Subscribe to server errors
+    const unsubError = networkClient.onError((msg) => { flashError(msg); });
 
-    if (gs && gs.status === 'playing') {
-      triggerBotIfNeeded();
-    }
+    // Subscribe to settlement
+    settlementListenerRef.current = networkClient.onSettlement((result: SettlementData) => {
+      gameStateRef.current && renderOnlineGameState(gameStateRef.current as GameStateData);
+      renderOnlineSettlement(result);
+    });
 
     return () => {
       clearTurnTimer();
       clearCheTimer();
       if (autoPlayTimerRef.current) clearTimeout(autoPlayTimerRef.current);
-      unsub();
-      engine.destroy();
+      if (stateListenerRef.current) stateListenerRef.current();
+      if (settlementListenerRef.current) settlementListenerRef.current();
+      unsubError();
     };
-  }, [gameId, isOnline, renderOnlineGameState, renderOnlineSettlement]);
+  }, [gameId]);
 
   // ===== Render Helpers =====
   const renderCard = (c: any, size: 'mini' | 'normal' | 'large', extraClass = '') => {
@@ -1598,9 +817,6 @@ export default function Game() {
       </div>
     );
   };
-
-  // Play slot positions
-  const slotPositions = ['slot-0', 'slot-1', 'slot-2', 'slot-3'];
 
   return (
     <div className="game-table" onClick={onTableBgTap}>

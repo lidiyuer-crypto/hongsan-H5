@@ -30,9 +30,9 @@
     // Path aliases
     "baseUrl": ".",
     "paths": {
-      "@engine/*": ["../src/engine/*"]
+      "@engine/*": ["../shared/engine/*"]
     }
   },
-  "include": ["src/**/*.ts", "../src/engine/**/*.js"],
+  "include": ["src/**/*.ts", "../shared/engine/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

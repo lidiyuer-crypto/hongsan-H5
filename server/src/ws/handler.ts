@@ -100,6 +100,10 @@ export const wsHandler: WebSocketHandler<WSData> = {
       return;
     }
 
+    // Mark client as alive on any message (prevents heartbeat kill)
+    const client = clients.get(data.userId);
+    if (client) client.alive = true;
+
     // Dispatch to handler
     const handler = handlers.get(parsed.type);
     if (handler) {

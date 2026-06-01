@@ -29,6 +29,7 @@ export class NetworkGameClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private authResolve: ((value: void) => void) | null = null;
+  private authReject: ((reason: Error) => void) | null = null;
 
   private stateListeners = new Set<StateListener>();
   private settlementListeners = new Set<SettlementListener>();
@@ -46,8 +47,17 @@ export class NetworkGameClient {
     this.token = token;
     return new Promise((resolve, reject) => {
       this.authResolve = resolve;
+      this.authReject = reject;
       this.reconnectAttempts = 0;
       this.doConnect();
+      // Timeout: reject if connection/auth takes too long
+      setTimeout(() => {
+        if (this.authResolve) {
+          this.authResolve = null;
+          this.authReject = null;
+          reject(new Error('连接超时，请检查服务器地址和端口'));
+        }
+      }, 10000);
     });
   }
 
@@ -143,11 +153,22 @@ export class NetworkGameClient {
           this.send({ type: 'reconnect' } as any);
         }
         this.reconnectAttempts = 0;
-        if (this.authResolve) { this.authResolve(); this.authResolve = null; }
+        if (this.authResolve) { this.authResolve(); this.authResolve = null; this.authReject = null; }
         break;
 
       case 'error':
         console.warn('[GameClient] Error:', msg.message);
+        // Reject pending connect promise on auth errors
+        if (this.authReject && msg.message.includes('认证')) {
+          const reject = this.authReject;
+          this.authResolve = null;
+          this.authReject = null;
+          this.reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+          if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
+          reject(new Error(msg.message));
+        }
+        // Notify error listeners
+        for (const l of this.errorListeners) l(msg.message);
         break;
 
       case 'room_created':
@@ -196,6 +217,8 @@ export class NetworkGameClient {
   send(msg: object) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
+    } else {
+      console.warn('[GameClient] Cannot send — WebSocket not open:', (msg as any).type);
     }
   }
 
@@ -215,6 +238,10 @@ export class NetworkGameClient {
 
   addBot() {
     this.send({ type: 'add_bot' });
+  }
+
+  updateConfig(config: Partial<GameConfig>) {
+    this.send({ type: 'update_config', ...config });
   }
 
   startGame() {
