@@ -52,7 +52,7 @@ export default function Room() {
   const [doubleType, setDoubleType] = useState<'flat' | 'steep'>(savedConfig.doubleType || 'flat');
   const [smartShuffle, setSmartShuffle] = useState(savedConfig.smartShuffle || false);
   const [smartShuffleLevel, setSmartShuffleLevel] = useState(savedConfig.smartShuffleLevel || 3);
-  const [roundCount, setRoundCount] = useState(8);
+  const [roundCount, setRoundCount] = useState(savedConfig.totalRounds || 8);
   const [showHandCount, setShowHandCount] = useState(savedConfig.showHandCount !== false);
 
   const allReady = players.length === 4 && players.every(p => p.ready || p.isBot);

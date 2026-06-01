@@ -839,6 +839,7 @@ export class GameRoom {
           totalRounds: g.config.totalRounds,
           isLastRound,
           accumulatedScores: g.accumulatedScores,
+          teamPotBonus: g.teamPotBonus,
         },
       });
     });

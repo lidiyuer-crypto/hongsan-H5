@@ -293,7 +293,40 @@ export default function Game() {
       turnTimePercent: 100,
     };
 
+    // Che phase: auto-select matching cards (same as local)
+    if (state.chePhase && myCanChe && !state.cheTimerExpired && state.lastValidPlay) {
+      const rank = state.lastValidPlay.rank;
+      let found = 0;
+      for (const card of myHand) {
+        if (card.rankValue === rank && found < 2) {
+          card.isSelected = true;
+          found++;
+        }
+      }
+      data.myHand = myHand;
+    }
+
+    // Finished state: reveal all opponent cards
+    if (state.status === 'finished') {
+      data.faceDownP1 = false; data.faceDownP2 = false; data.faceDownP3 = false;
+    }
+
+    // Business player red3 count detail
+    if (state.isBusinessMode) {
+      opponents.forEach((p: PlayerView, i: number) => {
+        if (p.id === state.businessPlayerId) {
+          const bpRed3Count = (state as any).red3CountByPlayer?.[p.id] || 0;
+          const idx = ['p1', 'p2', 'p3'][i];
+          if (bpRed3Count >= 2) {
+            (data as any)[idx + 'TeamText'] = '💼 做业务';
+            (data as any)[idx + 'TeamClass'] = 'solo';
+          }
+        }
+      });
+    }
+
     setGameUI(prev => ({ ...prev, ...data }));
+    return data;
   }, []);
 
   // ===== renderOnlineSettlement =====
@@ -305,15 +338,29 @@ export default function Game() {
       gs.players.forEach(p => { nameMap[p.id] = p.name; });
     }
 
-    const netResults = result.results.map(r => ({
-      ...r, playerName: nameMap[r.playerId] || r.name,
-    })).sort((a, b) => b.netWon - a.netWon);
+    // Beiguan detection: players who didn't finish are "被关"
+    const netResults = result.results.map(r => {
+      const player = gs?.players.find(p => p.id === r.playerId);
+      const isBeiguan = player && (!player.finished || (player.hand && player.hand.length > 0));
+      return {
+        ...r,
+        playerName: nameMap[r.playerId] || r.name,
+        rankName: isBeiguan ? '被关' : r.rankName,
+        rankClass: isBeiguan ? 'rank-beiguan' : (r.rank ? ['rank-1', 'rank-2', 'rank-3', 'rank-4'][r.rank - 1] : ''),
+      };
+    }).sort((a, b) => b.netWon - a.netWon);
 
     const redPlayers = result.results.filter(r => r.isRed3Team);
     const blackPlayers = result.results.filter(r => !r.isRed3Team);
     const redTotal = redPlayers.reduce((s, r) => s + r.pot, 0);
     const blackTotal = blackPlayers.reduce((s, r) => s + r.pot, 0);
     const doubleTypeText = gs?.config.doubleType === 'steep' ? '陡翻' : '平翻';
+
+    // Team pot bonus (tribute)
+    const tb = result.teamPotBonus || { red_team: 0, black_team: 0 };
+    const redBonus = tb.red_team || 0;
+    const blackBonus = tb.black_team || 0;
+    const showFormula = redBonus !== 0 || blackBonus !== 0;
 
     const titleMap: Record<string, string> = {
       '双关': '双关胜利！', '业务胜利': '业务玩家胜利！',
@@ -357,11 +404,11 @@ export default function Game() {
       settlementBlackPlayers: blackPlayers,
       settlementRedTotal: redTotal,
       settlementBlackTotal: blackTotal,
-      settlementRedBonus: 0,
-      settlementBlackBonus: 0,
+      settlementRedBonus: redBonus,
+      settlementBlackBonus: blackBonus,
       settlementRedFinal: redPlayers.reduce((s, r) => s + r.netWon, 0),
       settlementBlackFinal: blackPlayers.reduce((s, r) => s + r.netWon, 0),
-      settlementShowFormula: true,
+      settlementShowFormula: showFormula,
       settlementCurrentRound: result.currentRound,
       settlementTotalRounds: result.totalRounds,
       settlementIsLastRound: result.isLastRound,
@@ -376,6 +423,54 @@ export default function Game() {
       } else {
         setTimeout(() => playSound('settlement_lose'), 600);
       }
+    }
+  }, []);
+
+  // ===== Shared sound detection (works for both local engine state and online GameStateData) =====
+  const detectGameSounds = useCallback((gs: any) => {
+    if (gs.chePhase !== lastChePhaseRef.current) {
+      lastChePhaseRef.current = gs.chePhase;
+      if (gs.chePhase) playSound('che_open');
+      else playSound('che_close');
+    }
+    if (gs.turnIndex !== lastTurnIndexRef.current && gs.status !== 'finished') {
+      const prevTurn = lastTurnIndexRef.current;
+      if (gs.turnIndex === 0) {
+        playSound('turn_start');
+        if (gs.isFirstTurnOfGame) playSound('first_turn_h4');
+      }
+      if (prevTurn >= 0 && gs.passStatuses && gs.passStatuses[prevTurn]) {
+        playSound('pass_other');
+      }
+    }
+    const finishedSet = new Set<number>();
+    (gs.players || []).forEach((p: any) => { if (p && p.finished) finishedSet.add(p.id); });
+    finishedSet.forEach((id: number) => {
+      if (!lastFinishedRef.current.has(id)) {
+        lastFinishedRef.current.add(id);
+        if (id !== 0) playSound('player_finish');
+      }
+    });
+    (gs.players || []).forEach((p: any) => {
+      if (p && p.revealed && !lastRevealedRef.current.has(p.id)) {
+        lastRevealedRef.current.add(p.id);
+        playSound('red3_reveal');
+      }
+    });
+  }, []);
+
+  const handleTurnAndTimers = useCallback((gs: any, data: Partial<GameUIState>) => {
+    if (gs.status !== 'finished' && gs.turnIndex !== lastTurnIndexRef.current) {
+      lastTurnIndexRef.current = gs.turnIndex;
+      startTurnTimer();
+    }
+    if (uiRef.current.isManaged && gs.turnIndex === 0 && !gs.chePhase) {
+      scheduleAutoPlay();
+    }
+    if (data.showTimer && !cheTimerRef.current) {
+      startCheTimer();
+    } else if (!data.showTimer && cheTimerRef.current) {
+      clearCheTimer();
     }
   }, []);
 
@@ -528,61 +623,10 @@ export default function Game() {
       data.timerPercent = 100;
     }
 
-    // ===== 音效检测 =====
-    // 扯牌阶段变化
-    if (gs.chePhase !== lastChePhaseRef.current) {
-      lastChePhaseRef.current = gs.chePhase;
-      if (gs.chePhase) playSound('che_open');
-      else playSound('che_close');
-    }
-    // 回合切换
-    if (gs.turnIndex !== lastTurnIndexRef.current && gs.status !== 'finished') {
-      const prevTurn = lastTurnIndexRef.current;
-      if (gs.turnIndex === 0) {
-        playSound('turn_start');
-        if (gs.isFirstTurnOfGame) playSound('first_turn_h4');
-      }
-      // 其他人过牌音效
-      if (prevTurn >= 0 && gs.passStatuses && gs.passStatuses[prevTurn]) {
-        playSound('pass_other');
-      }
-    }
-    // 玩家出完牌
-    const finishedSet = new Set<number>();
-    gs.players.forEach((p: any) => { if (p && p.finished) finishedSet.add(p.id); });
-    finishedSet.forEach((id: number) => {
-      if (!lastFinishedRef.current.has(id)) {
-        lastFinishedRef.current.add(id);
-        if (id !== 0) playSound('player_finish');
-      }
-    });
-    // 红三暴露
-    gs.players.forEach((p: any) => {
-      if (p && p.revealed && !lastRevealedRef.current.has(p.id)) {
-        lastRevealedRef.current.add(p.id);
-        playSound('red3_reveal');
-      }
-    });
-
+    // ===== 音效检测 (shared between local and online) =====
+    detectGameSounds(gs);
     setGameUI(prev => ({ ...prev, ...data }));
-
-    // Turn timer management (only when game is playing)
-    if (gs.status !== 'finished' && gs.turnIndex !== lastTurnIndexRef.current) {
-      lastTurnIndexRef.current = gs.turnIndex;
-      startTurnTimer();
-    }
-
-    // Managed auto-play
-    if (uiRef.current.isManaged && gs.turnIndex === 0 && !gs.chePhase) {
-      scheduleAutoPlay();
-    }
-
-    // Che timer management
-    if (data.showTimer && !cheTimerRef.current) {
-      startCheTimer();
-    } else if (!data.showTimer && cheTimerRef.current) {
-      clearCheTimer();
-    }
+    handleTurnAndTimers(gs, data);
   }, []);
 
   // ===== Turn Timer =====
@@ -1337,7 +1381,9 @@ export default function Game() {
           // Settlement will arrive via onSettlement
           return;
         }
-        renderOnlineGameState(state);
+        const uiData = renderOnlineGameState(state);
+        detectGameSounds(state);
+        handleTurnAndTimers(state, uiData);
       });
 
       // Subscribe to server errors

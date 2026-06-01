@@ -14,6 +14,7 @@ export interface ClientMessages {
   next_round: { type: "next_round" };
   leave_room: { type: "leave_room" };
   reconnect: { type: "reconnect" };
+  ping: { type: "ping" };
 }
 
 export type ClientMessage = ClientMessages[keyof ClientMessages];
@@ -123,6 +124,7 @@ export interface SettlementData {
   totalRounds: number;
   isLastRound: boolean;
   accumulatedScores: Record<number, number>;
+  teamPotBonus?: { red_team: number; black_team: number } | null;
 }
 
 export interface BombDetail {

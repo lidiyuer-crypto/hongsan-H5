@@ -104,7 +104,8 @@ export const wsHandler: WebSocketHandler<WSData> = {
     const handler = handlers.get(parsed.type);
     if (handler) {
       handler(data.userId, parsed);
-    } else {
+    } else if (parsed.type !== 'ping') {
+      // Silently ignore pings (keepalive), only warn for truly unknown types
       ws.send(JSON.stringify({ type: "error", message: `未知消息类型: ${parsed.type}` }));
     }
   },

@@ -119,7 +119,9 @@ export class NetworkGameClient {
   private startHeartbeat() {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      // WebSocket has built-in ping/pong but we keep alive via messages
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.send({ type: 'ping' } as any);
+      }
     }, 15000);
   }
 
@@ -136,6 +138,10 @@ export class NetworkGameClient {
         this.nickname = msg.nickname;
         this.notifyConnection('connected');
         this.startHeartbeat();
+        // Send reconnect if we were previously in a game
+        if (this.roomCode) {
+          this.send({ type: 'reconnect' } as any);
+        }
         this.reconnectAttempts = 0;
         if (this.authResolve) { this.authResolve(); this.authResolve = null; }
         break;
