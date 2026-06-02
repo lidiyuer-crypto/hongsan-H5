@@ -5,12 +5,16 @@ WORKDIR /app
 # Install curl for healthcheck
 RUN apk add --no-cache curl
 
-# Copy package files and install dependencies (layer caching)
-COPY package.json bun.lock ./
+# Copy server package files and install dependencies (layer caching)
+COPY server/package.json server/bun.lock ./
 RUN bun install --frozen-lockfile
 
-# Copy source code
-COPY . .
+# Copy shared engine to /shared/ so ../../../shared/ resolves in container
+# (server files are at /app/, so ../../../ = /, and /shared/ is at root)
+COPY shared/ /shared/
+
+# Copy server source code
+COPY server/ .
 
 # Create data directory for SQLite persistence
 RUN mkdir -p /app/data

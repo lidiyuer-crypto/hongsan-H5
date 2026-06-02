@@ -8,7 +8,9 @@ version: "3.8"
 services:
   # --- Bun 游戏服务器 (API + WebSocket) ---
   server:
-    build: ./server
+    build:
+      context: .
+      dockerfile: server/Dockerfile
     container_name: hongsan-server
     volumes:
       # SQLite 数据库持久化到 NAS 宿主机
