@@ -29,10 +29,12 @@ export default function Room() {
     try { return JSON.parse(sessionStorage.getItem('onlineRoomConfig') || '{}'); }
     catch { return {}; }
   })();
-  const action = sessionStorage.getItem('roomAction') || 'create';
+  const action = sessionStorage.getItem('roomAction') || '';  // '' = unknown (direct URL nav)
   const code = paramCode || sessionStorage.getItem('onlineRoomCode') || '----';
 
   const [roomCode, setRoomCode] = useState(code);
+  // isOwner: sessionStorage.roomAction is the definitive source.
+  // Only 'create' → owner. 'join' or '' → not owner (server may override '' case).
   const [isOwner, setIsOwner] = useState(action === 'create');
   const [onlineOwnerId, setOnlineOwnerId] = useState<number>(0);
   const [players, setPlayers] = useState<Player[]>([]);
@@ -78,10 +80,20 @@ export default function Room() {
       setPlayers(mapped);
       // Persist to sessionStorage
       try { sessionStorage.setItem('onlineRoomPlayers', JSON.stringify(mapped)); } catch {}
-      // Determine if current user is owner
+      // Determine if current user is owner.
+      // sessionStorage.roomAction is the definitive source (prevents same-user-2-tabs bug).
+      // Only fall back to server ownerId when roomAction is unknown (direct URL nav).
       if (ownerId !== undefined) {
         setOnlineOwnerId(ownerId);
-        setIsOwner(auth.userId === ownerId);
+        const storedAction = sessionStorage.getItem('roomAction');
+        if (storedAction === 'create') {
+          setIsOwner(true);
+        } else if (storedAction === 'join') {
+          setIsOwner(false);
+        } else {
+          // No stored action (direct URL nav) — fall back to server
+          setIsOwner(auth.userId === ownerId);
+        }
       }
       // Sync my ready state
       const me = plist.find(p => p.userId === auth.userId);
