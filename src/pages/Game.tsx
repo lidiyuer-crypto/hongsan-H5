@@ -154,22 +154,13 @@ export default function Game() {
     playSound('timer_timeout');
     const gs = gameStateRef.current;
     if (!gs || gs.status === 'finished' || gs.turnIndex !== 0 || gs.chePhase) return;
+    if (uiRef.current.isManaged) return; // already managed — scheduleAutoPlay handles it
 
-    if (gs.lastValidPlay) {
-      doPass();
-    } else {
-      const hand = (gs.players[0]?.hand || []);
-      if (hand.length === 0) return;
-      const plays = generateAllValidPlays(hand, null, gs.isFirstTurnOfGame);
-      if (plays.length === 0) { doPass(); return; }
-      const play = plays[0];
-      const handWithSel = hand.map((c: any) => {
-        const match = play.cards.some((pc: any) => pc.suit === c.suit && pc.rankValue === c.rankValue);
-        return { ...c, isSelected: match };
-      });
-      setGameUI(prev => ({ ...prev, myHand: handWithSel }));
-      setTimeout(() => doPlay(), 400);
-    }
+    // Auto-enable managed mode (托管) on timeout — the 托管 button lights up.
+    // Player can exit managed mode by making a manual move (card select / play / pass).
+    playSound('managed_on');
+    setGameUI(prev => ({ ...prev, isManaged: true }));
+    setTimeout(() => scheduleAutoPlay(), 200);
   };
 
   // ===== Che Timer =====

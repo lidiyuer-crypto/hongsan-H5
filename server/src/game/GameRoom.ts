@@ -25,7 +25,7 @@ export type { RoomConfig };
 
 // ===== Constants =====
 
-const TURN_TIMEOUT = 30000;  // 30s
+const TURN_TIMEOUT = 60000;  // 60s (safety net — client handles timeout at 30s via managed mode)
 const CHE_TIMEOUT = 3000;    // 3s
 const DISCONNECT_GRACE = 60000; // 60s before AI substitution
 
