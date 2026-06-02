@@ -234,12 +234,20 @@ export class GameRoom {
   }
 
   removePlayer(userId: number) {
+    const wasOwner = this.ownerId === userId;
     this.players = this.players.filter(p => p.userId !== userId);
     if (this.players.length === 0) {
       this.cleanup();
-    } else {
-      this.broadcastRoomState();
+      return;
     }
+    // Transfer ownership if the owner left — assign to first remaining human
+    if (wasOwner) {
+      const nextHuman = this.players.find(p => !p.isBot);
+      if (nextHuman) {
+        this.ownerId = nextHuman.userId;
+      }
+    }
+    this.broadcastRoomState();
   }
 
   toggleReady(userId: number) {
