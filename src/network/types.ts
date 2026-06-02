@@ -163,6 +163,7 @@ export interface ServerMessages {
   player_left: { type: "player_left"; userId: number };
   player_disconnected: { type: "player_disconnected"; userId: number };
   player_reconnected: { type: "player_reconnected"; userId: number };
+  next_round_status: { type: "next_round_status"; readyCount: number; totalHumans: number; readyUserIds: number[] };
 }
 
 export type ServerMessage = ServerMessages[keyof ServerMessages];

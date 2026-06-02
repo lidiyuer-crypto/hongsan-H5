@@ -612,18 +612,11 @@ export default function Game() {
   const handleNextRound = () => {
     networkClient.nextRound();
     lastTurnIndexRef.current = -1;
+    // Show waiting state until all humans are ready
     setGameUI(prev => ({
       ...prev,
-      showSettlement: false,
-      playSlots: [
-        { cards: [], passed: false }, { cards: [], passed: false },
-        { cards: [], passed: false }, { cards: [], passed: false },
-      ],
-      historyCards: [],
-      tablePotCount: 0,
-      showControls: false,
-      showCheControls: false,
-      showTimer: false,
+      settlementWaiting: true,
+      settlementReadyInfo: '等待其他玩家准备...',
     }));
   };
 
@@ -678,6 +671,19 @@ export default function Game() {
         return;
       }
       const uiData = renderOnlineGameState(state);
+      // If transitioning from settlement to new round, hide settlement
+      if (uiRef.current.showSettlement) {
+        setGameUI(prev => ({
+          ...prev,
+          showSettlement: false,
+          playSlots: [
+            { cards: [], passed: false }, { cards: [], passed: false },
+            { cards: [], passed: false }, { cards: [], passed: false },
+          ],
+          historyCards: [],
+          tablePotCount: 0,
+        }));
+      }
       detectGameSounds(state);
       handleTurnAndTimers(state, uiData);
     });
@@ -687,8 +693,19 @@ export default function Game() {
 
     // Subscribe to settlement
     settlementListenerRef.current = networkClient.onSettlement((result: SettlementData) => {
+      setGameUI(prev => ({ ...prev, settlementWaiting: false, settlementReadyInfo: '' }));
       gameStateRef.current && renderOnlineGameState(gameStateRef.current as GameStateData);
       renderOnlineSettlement(result);
+    });
+
+    // Subscribe to next-round ready status
+    const unsubNextRound = networkClient.onNextRoundStatus((readyCount, totalHumans) => {
+      if (readyCount >= totalHumans) return; // game is starting
+      setGameUI(prev => ({
+        ...prev,
+        settlementWaiting: true,
+        settlementReadyInfo: `等待其他玩家准备... (${readyCount}/${totalHumans})`,
+      }));
     });
 
     return () => {
@@ -698,6 +715,7 @@ export default function Game() {
       if (stateListenerRef.current) stateListenerRef.current();
       if (settlementListenerRef.current) settlementListenerRef.current();
       unsubError();
+      unsubNextRound();
     };
   }, [gameId]);
 
@@ -1026,6 +1044,7 @@ export default function Game() {
         <div className="my-info-bar">
           <span className="my-name">{ui.myName}</span>
           {renderTeamBadge(ui.myTeamClass, ui.myTeamText)}
+          {ui.myRank > 0 && renderRankBadge(ui.myRank, ui.myRankLabel)}
           <div className="pot-chip">
             <span>🪙</span>
             <span className="pot-num">{ui.myPot}</span>
@@ -1239,7 +1258,19 @@ export default function Game() {
                   <button className="settlement-btn primary" onClick={openScorePanel}>查看最终积分</button>
                 </>
               ) : (
-                <button className="settlement-btn primary" onClick={handleNextRound}>准备</button>
+                <>
+                  {ui.settlementWaiting && (
+                    <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--accent)', fontWeight: 700 }}>
+                      {ui.settlementReadyInfo}
+                    </span>
+                  )}
+                  <button
+                    className="settlement-btn primary"
+                    onClick={handleNextRound}
+                    disabled={ui.settlementWaiting}>
+                    {ui.settlementWaiting ? '已准备 ✓' : '准备'}
+                  </button>
+                </>
               )}
             </div>
           </div>

@@ -29,6 +29,7 @@ export const RANK_CLASSES = ['rank-1', 'rank-2', 'rank-3', 'rank-4'];
 export interface GameUIState {
   myPlayerId: number; myHand: any[]; myPot: number;
   myName: string; myTeamText: string; myTeamClass: string;
+  myRank: number; myRankLabel: string;
   p1Cards: any[]; p2Cards: any[]; p3Cards: any[];
   p1Pot: number; p2Pot: number; p3Pot: number;
   p1Name: string; p2Name: string; p3Name: string;
@@ -60,6 +61,7 @@ export interface GameUIState {
   settlementShowFormula: boolean;
   settlementCurrentRound: number; settlementTotalRounds: number;
   settlementIsLastRound: boolean;
+  settlementWaiting: boolean; settlementReadyInfo: string;
   showScorePanel: boolean; scorePanelPlayers: any[];
   scorePanelCurrentRound: number; scorePanelTotalRounds: number;
   showSelfCheDialog: boolean; selfCheCards: any[] | null;
@@ -73,6 +75,8 @@ export function defaultGameUI(): GameUIState {
     myName: '我',
     myTeamText: '未知身份',
     myTeamClass: 'unknown',
+    myRank: 0,
+    myRankLabel: '',
     p1Cards: [], p2Cards: [], p3Cards: [],
     p1Pot: 0, p2Pot: 0, p3Pot: 0,
     p1Name: '玩家A', p2Name: '玩家B', p3Name: '玩家C',
@@ -126,6 +130,8 @@ export function defaultGameUI(): GameUIState {
     settlementCurrentRound: 1,
     settlementTotalRounds: 8,
     settlementIsLastRound: false,
+    settlementWaiting: false,
+    settlementReadyInfo: '',
     showScorePanel: false,
     scorePanelPlayers: [] as any[],
     scorePanelCurrentRound: 1,

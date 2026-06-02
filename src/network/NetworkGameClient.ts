@@ -19,6 +19,7 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 're
 type StateListener = (state: GameStateData) => void;
 type SettlementListener = (result: SettlementData) => void;
 type RoomStateListener = (players: RoomPlayer[], config: GameConfig, ownerId?: number) => void;
+type NextRoundStatusListener = (readyCount: number, totalHumans: number, readyUserIds: number[]) => void;
 type ConnectionListener = (status: ConnectionStatus) => void;
 type ErrorListener = (message: string) => void;
 
@@ -34,6 +35,7 @@ export class NetworkGameClient {
   private stateListeners = new Set<StateListener>();
   private settlementListeners = new Set<SettlementListener>();
   private roomStateListeners = new Set<RoomStateListener>();
+  private nextRoundStatusListeners = new Set<NextRoundStatusListener>();
   private connectionListeners = new Set<ConnectionListener>();
   private errorListeners = new Set<ErrorListener>();
 
@@ -203,6 +205,10 @@ export class NetworkGameClient {
         }
         break;
 
+      case 'next_round_status':
+        for (const l of this.nextRoundStatusListeners) l(msg.readyCount, msg.totalHumans, msg.readyUserIds);
+        break;
+
       case 'player_disconnected':
       case 'player_reconnected':
       case 'player_joined':
@@ -293,6 +299,11 @@ export class NetworkGameClient {
   onConnectionChange(listener: ConnectionListener): () => void {
     this.connectionListeners.add(listener);
     return () => this.connectionListeners.delete(listener);
+  }
+
+  onNextRoundStatus(listener: NextRoundStatusListener): () => void {
+    this.nextRoundStatusListeners.add(listener);
+    return () => this.nextRoundStatusListeners.delete(listener);
   }
 
   onError(listener: ErrorListener): () => void {

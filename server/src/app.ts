@@ -345,7 +345,7 @@ onMessage('next_round', (userId) => {
     return;
   }
 
-  const result = room.nextRound();
+  const result = room.nextRound(userId);
   console.log('[next_round] Result:', JSON.stringify(result));
   if ('error' in result) {
     sendToUser(userId, { type: 'action_result', success: false, error: result.error });

@@ -28,21 +28,82 @@ export function computeGameUI(state: GameStateData, prevUI: GameUIState): Partia
     myHand.forEach((c: any) => { if (prevSel.has(cardKey(c))) c.isSelected = true; });
   }
 
-  // Determine team text/class for each player
-  const getTeamInfo = (p: PlayerView, isMe: boolean) => {
-    if (isMe && state.isBusinessMode && state.players[mySeat] === p) {
-      return p.isRed3Team ? { text: '红三(业务)', cls: 'red3' } : { text: '未知身份', cls: 'unknown' };
+  // ===== Team Identity Deduction =====
+  // Only explicit confirmations — NO cross-deduction from "2 黑三 → 2 红三".
+  // Reasoning: if 2 players are 黑三, the remaining 2 might have 1 Red 3 each (both 红三)
+  // OR one player has both Red 3s (business) leaving the other as 黑三. We cannot know.
+  //
+  // Confirmed by:
+  //   1. Self: count Red 3s in own hand → always 100% accurate
+  //   2. Played Red 3 → confirmed 红三
+  //   3. Finished without Red 3 → confirmed 黑三
+  //   4. Self has both Red 3s → everyone else confirmed 黑三
+  //   5. Both Red 3s played (2 revealed 红三) → remaining confirmed 黑三
+
+  type TeamId = 'red' | 'black' | 'business';
+  const confirmed: Record<number, TeamId> = {};
+
+  // 1. Self: count Red 3s in own hand → always know own team
+  const myRed3Count = myPlayer.hand.filter((c: any) => c.isRed3).length;
+  if (myRed3Count >= 2) confirmed[mySeat] = 'business';
+  else if (myRed3Count === 1) confirmed[mySeat] = 'red';
+  else confirmed[mySeat] = 'black';
+
+  // 2. Server-revealed players (played a Red 3 → confirmed 红三)
+  for (const p of state.players) {
+    if (p.revealed && p.isRed3Team) {
+      confirmed[p.id] = p.id === state.businessPlayerId ? 'business' : 'red';
     }
-    if (!p.revealed) return { text: '未知身份', cls: 'unknown' };
-    if (state.isBusinessMode && state.businessPlayerId === p.id) return { text: '红三(业务)', cls: 'red3' };
-    if (p.isRed3Team) return { text: '红三阵营', cls: 'red3' };
-    return { text: '黑三阵营', cls: 'black3' };
+  }
+
+  // 3. Finished without ever playing Red 3 → must be 黑三
+  for (const p of state.players) {
+    if (p.finished && !confirmed[p.id]) {
+      confirmed[p.id] = 'black';
+    }
+  }
+
+  // 4. Self has both Red 3s → everyone else is definitely 黑三
+  if (myRed3Count >= 2) {
+    for (const p of state.players) {
+      if (p.id !== mySeat) confirmed[p.id] = 'black';
+    }
+  }
+
+  // 5. Business player revealed (has both Red 3s) → all unconfirmed are 黑三
+  //    Only 1 player needs to be revealed — they hold both Red 3s.
+  if (state.isBusinessMode && state.businessPlayerId >= 0) {
+    const bp = state.players.find(p => p.id === state.businessPlayerId);
+    if (bp && bp.revealed) {
+      for (const p of state.players) {
+        if (!confirmed[p.id]) confirmed[p.id] = 'black';
+      }
+    }
+  }
+
+  // 6. Both Red 3s accounted for (2 separate revealed 红三) → remaining are 黑三
+  const redCount = Object.values(confirmed).filter(t => t === 'red' || t === 'business').length;
+  if (redCount >= 2) {
+    for (const p of state.players) {
+      if (!confirmed[p.id]) confirmed[p.id] = 'black';
+    }
+  }
+  // Note: NO deduction from 2 黑三 → remaining 红三. The remaining 2 players
+  // could be (红三+红三) or (业务+黑三) — wait for explicit Red 3 play or finish.
+
+  // Build team labels from deduced map
+  const getTeamFromConfirmed = (playerId: number): { text: string; cls: string } => {
+    const t = confirmed[playerId];
+    if (t === 'business') return { text: '红三(业务)', cls: 'red3' };
+    if (t === 'red') return { text: '红三阵营', cls: 'red3' };
+    if (t === 'black') return { text: '黑三阵营', cls: 'black3' };
+    return { text: '未知身份', cls: 'unknown' };
   };
 
-  const myTeam = getTeamInfo(myPlayer, true);
-  const t1 = getTeamInfo(opponents[0], false);
-  const t2 = getTeamInfo(opponents[1], false);
-  const t3 = getTeamInfo(opponents[2], false);
+  const myTeam = getTeamFromConfirmed(mySeat);
+  const t1 = getTeamFromConfirmed(opponents[0].id);
+  const t2 = getTeamFromConfirmed(opponents[1].id);
+  const t3 = getTeamFromConfirmed(opponents[2].id);
 
   // Build play slots
   const playSlots = state.passStatuses.map((passed, i) => ({
@@ -61,6 +122,8 @@ export function computeGameUI(state: GameStateData, prevUI: GameUIState): Partia
     myName: myPlayer.name,
     myTeamText: myTeam.text,
     myTeamClass: myTeam.cls,
+    myRank: myPlayer.rank || 0,
+    myRankLabel: myPlayer.rank ? ['上游', '前中游', '后中游', '下游'][myPlayer.rank - 1] : '',
 
     p1Cards: opponents[0].hand || [],
     p2Cards: opponents[1].hand || [],

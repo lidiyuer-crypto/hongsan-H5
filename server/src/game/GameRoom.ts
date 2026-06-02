@@ -185,6 +185,7 @@ export class GameRoom {
   players: { userId: number; seat: number; name: string; ready: boolean; isBot: boolean }[] = [];
   config: RoomConfig;
   game: GameStateData | null = null;
+  private nextRoundReady: Set<number> = new Set(); // userIds who clicked "准备" for next round
   private botCounter = 0;
 
   private turnTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,6 +265,12 @@ export class GameRoom {
   // ===== Game Lifecycle =====
 
   startGame() {
+    // Prevent overwriting an existing game (could be a finished game waiting for nextRound)
+    if (this.game) {
+      console.log('[GameRoom] startGame denied — game already exists:', this.game.status);
+      return;
+    }
+
     // Auto-fill remaining seats with bots
     while (this.players.length < 4) {
       const result = this.addBot();
@@ -306,12 +313,35 @@ export class GameRoom {
     this.startTurnTimer();
   }
 
-  nextRound() {
+  nextRound(userId: number) {
     if (!this.game) return { error: '游戏未开始' };
     const g = this.game;
 
     if (g.currentRound >= g.config.totalRounds) return { error: '已是最后一局' };
     if (g.status !== 'finished') return { error: '当前局还未结束' };
+
+    // Track readiness — all human players must click "准备" before next round starts
+    this.nextRoundReady.add(userId);
+    const humanPlayers = this.players.filter(p => !p.isBot);
+    const allHumansReady = humanPlayers.every(p => this.nextRoundReady.has(p.userId));
+    const readyCount = this.nextRoundReady.size;
+    const totalHumans = humanPlayers.length;
+
+    if (!allHumansReady) {
+      // Notify all clients about ready status
+      this.players.forEach(rp => {
+        sendToUser(rp.userId, {
+          type: 'next_round_status',
+          readyCount,
+          totalHumans,
+          readyUserIds: [...this.nextRoundReady],
+        });
+      });
+      return { waiting: true, readyCount, totalHumans };
+    }
+
+    // All humans ready — start next round
+    this.nextRoundReady.clear();
 
     const deck = createFullDeck();
     const hands = this.config.smartShuffle
@@ -600,6 +630,21 @@ export class GameRoom {
     if (!this.game) return;
     const g = this.game;
 
+    // Prevent double-settlement
+    if (g.status !== 'finished') return;
+
+    // Clear all timers and bot schedules (prevents stale timers from firing post-game)
+    this.clearTimers();
+    this.clearCheTimers();
+    if (this.collectTimer) { clearTimeout(this.collectTimer); this.collectTimer = null; }
+    this.bots.clearAll();
+
+    // Reset ready states and next-round readiness
+    this.nextRoundReady.clear();
+    this.players.forEach(p => { p.ready = false; });
+    // Keep bots ready for next round
+    this.players.forEach(p => { if (p.isBot) p.ready = true; });
+
     const { fans, bombFans, extraFans, extraFansLabel, bombDetails } = calculateFans(
       g.roundHistory,
       g.victoryReason || '',
@@ -685,8 +730,11 @@ export class GameRoom {
       if (this.game.status !== 'playing') return; // Game already ended — skip pot collection
 
       const winnerId = collectPotState(this.game);
-      // Set turn to winner
+      // Set turn to winner, but skip past them if they've finished (played last card)
       this.game.turnIndex = winnerId;
+      if (this.game.players[winnerId]?.finished) {
+        this.game.turnIndex = findNextPlayer(this.game, winnerId);
+      }
       this.startTurnTimer();
       this.broadcastGameState();
     }, 1000);
