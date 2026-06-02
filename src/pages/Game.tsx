@@ -83,7 +83,7 @@ export default function Game() {
     }
     if (gs.turnIndex !== lastTurnIndexRef.current && gs.status !== 'finished') {
       const prevTurn = lastTurnIndexRef.current;
-      if (gs.turnIndex === 0) {
+      if (gs.turnIndex === gs.mySeat) {
         playSound('turn_start');
         if (gs.isFirstTurnOfGame) playSound('first_turn_h4');
       }
@@ -96,7 +96,7 @@ export default function Game() {
     finishedSet.forEach((id: number) => {
       if (!lastFinishedRef.current.has(id)) {
         lastFinishedRef.current.add(id);
-        if (id !== 0) playSound('player_finish');
+        if (id !== gs.mySeat) playSound('player_finish');
       }
     });
     (gs.players || []).forEach((p: any) => {
@@ -112,7 +112,7 @@ export default function Game() {
       lastTurnIndexRef.current = gs.turnIndex;
       startTurnTimer();
     }
-    if (uiRef.current.isManaged && gs.turnIndex === 0 && !gs.chePhase) {
+    if (uiRef.current.isManaged && gs.turnIndex === gs.mySeat && !gs.chePhase) {
       scheduleAutoPlay();
     }
     if (data.showTimer && !cheTimerRef.current) {
@@ -153,7 +153,7 @@ export default function Game() {
   const onTurnTimeout = () => {
     playSound('timer_timeout');
     const gs = gameStateRef.current;
-    if (!gs || gs.status === 'finished' || gs.turnIndex !== 0 || gs.chePhase) return;
+    if (!gs || gs.status === 'finished' || gs.turnIndex !== gs.mySeat || gs.chePhase) return;
     if (uiRef.current.isManaged) return; // already managed — scheduleAutoPlay handles it
 
     // Auto-enable managed mode (托管) on timeout — the 托管 button lights up.
@@ -376,11 +376,11 @@ export default function Game() {
     if (autoPlayTimerRef.current) return;
     if (!uiRef.current.isManaged) return;
     const gs = gameStateRef.current;
-    if (!gs || gs.status === 'finished' || gs.turnIndex !== 0) return;
+    if (!gs || gs.status === 'finished' || gs.turnIndex !== gs.mySeat) return;
 
     // In che phase — always decline for managed mode
     if (gs.chePhase) {
-      const myPlayer = gs.players[0];
+      const myPlayer = gs.players[gs.mySeat];
       if (myPlayer && myPlayer.canChe && !gs.cheTimerExpired) {
         autoPlayTimerRef.current = setTimeout(() => {
           autoPlayTimerRef.current = undefined;
@@ -393,7 +393,7 @@ export default function Game() {
     }
 
     // Use engine state directly to find a play (not UI ref which can be stale)
-    const myPlayer = gs.players[0];
+    const myPlayer = gs.players[gs.mySeat];
     if (!myPlayer || !myPlayer.hand || myPlayer.hand.length === 0) return;
 
     const handCopy = myPlayer.hand.map((c: any) => ({ ...c }));
@@ -405,7 +405,7 @@ export default function Game() {
 
       // Re-check conditions (might have changed during timeout)
       const gs2 = gameStateRef.current;
-      if (!gs2 || gs2.status === 'finished' || gs2.turnIndex !== 0) return;
+      if (!gs2 || gs2.status === 'finished' || gs2.turnIndex !== gs2.mySeat) return;
 
       if (plays.length === 0) {
         // No valid play — pass if required

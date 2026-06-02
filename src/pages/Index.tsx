@@ -144,14 +144,22 @@ export default function Index() {
       setAuthError('连接服务器失败');
       return;
     }
+    // Subscribe BEFORE joining to capture initial room_state broadcast
+    // (server broadcasts on addPlayer, but Room component hasn't mounted yet)
+    let captured = false;
+    const unsub1 = networkClient.onRoomState((players, config, ownerId) => {
+      sessionStorage.setItem('onlineRoomPlayers', JSON.stringify(players));
+      sessionStorage.setItem('onlineRoomConfig', JSON.stringify(config));
+      if (ownerId !== undefined) sessionStorage.setItem('onlineRoomOwnerId', String(ownerId));
+      if (!captured) {
+        captured = true;
+        unsub1(); // only need the first broadcast
+      }
+    });
     networkClient.joinRoom(onlineJoinCode);
     setTimeout(() => {
       sessionStorage.setItem('roomAction', 'join');
       sessionStorage.setItem('onlineRoomCode', onlineJoinCode);
-      sessionStorage.setItem('onlineRoomConfig', JSON.stringify({
-        baseAmount, doubleType, smartShuffle, smartShuffleLevel,
-        totalRounds: 8, showHandCount: true,
-      }));
       navigate(`/room/${onlineJoinCode}?online=1`);
     }, 500);
   };
