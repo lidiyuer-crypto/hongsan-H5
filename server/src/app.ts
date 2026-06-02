@@ -204,6 +204,9 @@ onMessage('join_room', (userId, data) => {
     return;
   }
 
+  // Auto-ready: joining player is automatically seated and ready
+  room.toggleReady(userId);
+
   setUserRoom(userId, code);
   sendToUser(userId, { type: 'room_joined', roomCode: code, seat });
 });

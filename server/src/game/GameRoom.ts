@@ -247,10 +247,6 @@ export class GameRoom {
     if (!player) return;
     player.ready = !player.ready;
     this.broadcastRoomState();
-
-    if (this.players.length === 4 && this.players.every(p => p.ready)) {
-      this.startGame();
-    }
   }
 
   updateConfig(partial: Partial<RoomConfig>): void {
